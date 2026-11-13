@@ -7336,15 +7336,13 @@ fn incomplete_order_reports(
 fn partial_order_reports(error: &anyhow::Error) -> Vec<OrderStatusReport> {
     error
         .downcast_ref::<IncompleteOrderReports>()
-        .map(|incomplete| incomplete.reports.clone())
-        .unwrap_or_default()
+        .map_or_default(|incomplete| incomplete.reports.clone())
 }
 
 fn withheld_order_instruments(error: &anyhow::Error) -> AHashSet<InstrumentId> {
     error
         .downcast_ref::<IncompleteOrderReports>()
-        .map(|incomplete| incomplete.withheld_instruments.clone())
-        .unwrap_or_default()
+        .map_or_default(|incomplete| incomplete.withheld_instruments.clone())
 }
 
 fn is_commission_error(error: &anyhow::Error) -> bool {
@@ -7746,11 +7744,7 @@ impl LighterReportClient {
             .extend(self.markets.iter().map(|market| *market));
 
         let inactive_markets: Vec<i64> = match cmd.instrument_id {
-            Some(id) => self
-                .registry
-                .market_index(&id)
-                .map(|m| vec![m])
-                .unwrap_or_default(),
+            Some(id) => self.registry.market_index(&id).map_or_default(|m| vec![m]),
             None => sweep.markets.iter().copied().collect::<Vec<_>>(),
         };
 
@@ -7906,6 +7900,8 @@ async fn collect_fill_reports(
             market_id,
             account_index: Some(credential.account_index()),
             order_index,
+            order_index_str: None,
+            integrator_account_index: None,
             sort_by: LighterTradeSortBy::Timestamp,
             sort_dir: Some(LighterSortDirection::Desc),
             cursor: cursor.clone(),
@@ -10449,6 +10445,8 @@ async fn recover_terminal_trades(
         market_id: Some(market_index),
         account_index: Some(context.credential.account_index()),
         order_index: Some(order_index),
+        order_index_str: None,
+        integrator_account_index: None,
         sort_by: LighterTradeSortBy::Timestamp,
         sort_dir: Some(LighterSortDirection::Desc),
         cursor: None,
@@ -10713,6 +10711,7 @@ mod tests {
     use axum::{
         Router,
         extract::Query,
+        response::IntoResponse,
         routing::{get, post},
     };
     use nautilus_common::{
@@ -11393,25 +11392,35 @@ mod tests {
     }
 
     #[rstest]
-    #[case::inline_deferred(false, true)]
-    #[case::worker_deferred(true, true)]
-    #[case::inline_absent(false, false)]
-    #[case::worker_absent(true, false)]
+    #[case::inline_deferred(false, true, false, false)]
+    #[case::worker_deferred(true, true, false, false)]
+    #[case::inline_absent(false, false, false, false)]
+    #[case::worker_absent(true, false, false, false)]
+    #[case::inline_account_orders_failure(false, true, true, false)]
+    #[case::worker_account_orders_failure(true, true, true, false)]
+    #[case::inline_ambiguous_account_orders(false, true, false, true)]
+    #[case::worker_ambiguous_account_orders(true, true, false, true)]
     #[tokio::test]
     async fn single_order_lookup_distinguishes_deferred_report_from_absence(
         #[case] worker: bool,
         #[case] present: bool,
+        #[case] account_orders_fails: bool,
+        #[case] duplicate: bool,
     ) {
         let rig = dispatcher_rig("DEFERRED-PROBE");
         register_identity(&rig);
         let order = dispatcher_test_order(&rig, LighterOrderStatus::Open);
         let venue_order_id = VenueOrderId::from(order.order_id.as_str());
-        rig.dispatch.observe_create_submission(
-            &rig.cloid,
-            order.client_order_index,
-            TEST_SUBMISSION_NONCE,
-            venue_order_id,
-        );
+
+        if !duplicate {
+            rig.dispatch.observe_create_submission(
+                &rig.cloid,
+                order.client_order_index,
+                TEST_SUBMISSION_NONCE,
+                venue_order_id,
+            );
+        }
+
         rig.dispatch
             .order_identity(&rig.cloid)
             .unwrap()
@@ -11421,27 +11430,66 @@ mod tests {
             code: 200,
             message: None,
             next_cursor: None,
-            orders: if present { vec![order] } else { Vec::new() },
+            orders: if duplicate {
+                vec![order.clone(), order]
+            } else if present {
+                vec![order]
+            } else {
+                Vec::new()
+            },
         };
 
         let body = serde_json::to_string(&response).unwrap();
+        let account_orders_calls = Arc::new(AtomicUsize::new(0));
+        let active_calls = Arc::new(AtomicUsize::new(0));
+        let inactive_calls = Arc::new(AtomicUsize::new(0));
+
         let app = Router::new()
             .route(
-                "/api/v1/accountActiveOrders",
-                get(move || {
+                "/api/v1/accountOrders",
+                get({
                     let body = body.clone();
-                    async move { body }
+                    let calls = Arc::clone(&account_orders_calls);
+                    move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let body = body.clone();
+                        async move {
+                            if account_orders_fails {
+                                (axum::http::StatusCode::SERVICE_UNAVAILABLE, body).into_response()
+                            } else {
+                                (axum::http::StatusCode::OK, body).into_response()
+                            }
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/accountActiveOrders",
+                get({
+                    let body = body.clone();
+                    let calls = Arc::clone(&active_calls);
+                    move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let body = body.clone();
+                        async move { body }
+                    }
                 }),
             )
             .route(
                 "/api/v1/accountInactiveOrders",
-                get(|| async {
-                    axum::Json(LighterOrders {
-                        code: 200,
-                        message: None,
-                        next_cursor: None,
-                        orders: Vec::new(),
-                    })
+                get({
+                    let calls = Arc::clone(&inactive_calls);
+                    move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        async move {
+                            axum::Json(LighterOrders {
+                                code: 200,
+                                message: None,
+                                next_cursor: None,
+                                orders: Vec::new(),
+                            })
+                        }
+                    }
                 }),
             );
 
@@ -11465,7 +11513,11 @@ mod tests {
             UnixNanos::from(1),
             Some(rig.instrument_id),
             Some(rig.cloid),
-            Some(venue_order_id),
+            if duplicate {
+                None
+            } else {
+                Some(venue_order_id)
+            },
             None,
             None,
         );
@@ -11481,7 +11533,25 @@ mod tests {
         server.abort();
         let _ = server.await;
 
-        if present {
+        assert_eq!(
+            account_orders_calls.load(Ordering::SeqCst),
+            if account_orders_fails { 4 } else { 1 }
+        );
+        assert_eq!(
+            active_calls.load(Ordering::SeqCst),
+            usize::from(!present || account_orders_fails)
+        );
+        assert_eq!(inactive_calls.load(Ordering::SeqCst), usize::from(!present));
+
+        if duplicate {
+            let error = result.unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("ambiguous Lighter account-order lookup"),
+                "unexpected error: {error:#}"
+            );
+        } else if present {
             assert_eq!(
                 result.unwrap_err().to_string(),
                 "Lighter order report deferred until execution state is applied"
@@ -11498,6 +11568,156 @@ mod tests {
                 .has_publication()
         );
         assert!(rx.try_recv().is_err());
+    }
+
+    #[rstest]
+    #[case::other_market(LighterOrderStatus::Open, 999, false, false, false, 0)]
+    #[case::terminal(
+        LighterOrderStatus::Canceled,
+        TEST_MARKET_INDEX,
+        false,
+        false,
+        false,
+        0
+    )]
+    #[case::pending_flip(LighterOrderStatus::Open, TEST_MARKET_INDEX, true, false, false, 0)]
+    #[case::direct_open(LighterOrderStatus::Open, TEST_MARKET_INDEX, false, true, false, 0)]
+    #[case::known_terminal(LighterOrderStatus::Canceled, TEST_MARKET_INDEX, false, true, true, 0)]
+    #[case::known_other_market(LighterOrderStatus::Open, 999, false, false, true, 1)]
+    #[tokio::test]
+    async fn client_order_lookup_filters_market_status_and_pending(
+        #[case] status: LighterOrderStatus,
+        #[case] market_index: i64,
+        #[case] stop_pending_after_response: bool,
+        #[case] expect_present: bool,
+        #[case] known_venue: bool,
+        #[case] expected_inactive_calls: usize,
+    ) {
+        let rig = dispatcher_rig("FILTERED-PROBE");
+        register_identity(&rig);
+        let mut order = dispatcher_test_order(&rig, status);
+        order.market_index = market_index;
+        let venue_order_id = known_venue.then(|| VenueOrderId::from(order.order_id.as_str()));
+        rig.dispatch
+            .order_identity(&rig.cloid)
+            .unwrap()
+            .publish_update(UUID4::new());
+
+        let account_orders_body = serde_json::to_string(&LighterOrders {
+            code: 200,
+            message: None,
+            next_cursor: None,
+            orders: vec![order],
+        })
+        .unwrap();
+
+        let empty_body = serde_json::to_string(&LighterOrders {
+            code: 200,
+            message: None,
+            next_cursor: None,
+            orders: Vec::new(),
+        })
+        .unwrap();
+
+        let account_orders_calls = Arc::new(AtomicUsize::new(0));
+        let active_calls = Arc::new(AtomicUsize::new(0));
+        let inactive_calls = Arc::new(AtomicUsize::new(0));
+        let pending = Arc::new(AtomicBool::new(true));
+
+        let app = Router::new()
+            .route(
+                "/api/v1/accountOrders",
+                get({
+                    let body = account_orders_body.clone();
+                    let calls = Arc::clone(&account_orders_calls);
+                    let pending = Arc::clone(&pending);
+                    move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let body = body.clone();
+                        let pending = Arc::clone(&pending);
+                        async move {
+                            if stop_pending_after_response {
+                                pending.store(false, Ordering::Release);
+                            }
+
+                            body
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/accountActiveOrders",
+                get({
+                    let body = empty_body.clone();
+                    let calls = Arc::clone(&active_calls);
+                    move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let body = body.clone();
+                        async move { body }
+                    }
+                }),
+            )
+            .route(
+                "/api/v1/accountInactiveOrders",
+                get({
+                    let calls = Arc::clone(&inactive_calls);
+                    move || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        let body = empty_body.clone();
+                        async move { body }
+                    }
+                }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let config = LighterExecutionClientConfig {
+            base_url_http: Some(format!("http://{addr}")),
+            ..test_config()
+        };
+
+        let (mut client, _cache, _rx) = create_execution_client_with_config(config);
+        client.registry = rig.registry;
+        client.dispatch = rig.dispatch;
+        let credential = test_credential();
+        let lookup = OrderReportLookup::new(
+            &client.registry,
+            &client.dispatch,
+            Some(rig.instrument_id),
+            Some(&rig.cloid),
+            venue_order_id.as_ref(),
+        )
+        .unwrap();
+        let result = collect_order_while_pending(
+            &client.http_client,
+            &client.registry,
+            &credential,
+            &lookup,
+            || pending.load(Ordering::Acquire),
+        )
+        .await;
+        server.abort();
+        let _ = server.await;
+
+        assert_eq!(account_orders_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            active_calls.load(Ordering::SeqCst),
+            usize::from(!expect_present && !stop_pending_after_response)
+        );
+        assert_eq!(
+            inactive_calls.load(Ordering::SeqCst),
+            expected_inactive_calls
+        );
+
+        if expect_present {
+            assert!(result.unwrap().is_some());
+        } else {
+            assert_eq!(result.unwrap(), None);
+        }
     }
 
     fn register_test_instrument(
@@ -27189,6 +27409,8 @@ mod tests {
         sell_trade.ask_client_id_str = Some(sell_index.to_string());
         sell_trade.size = buy_trade.size;
         sell_trade.usd_amount = sell_trade.size * sell_trade.price;
+        buy.updated_at = buy_trade.timestamp + 1;
+        sell.updated_at = sell_trade.timestamp + 1;
         let expected = [
             (
                 rig.cloid,

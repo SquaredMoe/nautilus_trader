@@ -747,10 +747,7 @@ impl DataClient for InteractiveBrokersDataClient {
             let instrument = self
                 .instrument_provider
                 .find(&instrument_id)
-                .context(format!(
-                    "Instrument {} not found in provider",
-                    instrument_id
-                ))?;
+                .context(format!("Instrument {instrument_id} not found in provider"))?;
 
             let contract = self
                 .instrument_provider
@@ -847,10 +844,7 @@ impl DataClient for InteractiveBrokersDataClient {
             let instrument = self
                 .instrument_provider
                 .find(&instrument_id)
-                .context(format!(
-                    "Instrument {} not found in provider",
-                    instrument_id
-                ))?;
+                .context(format!("Instrument {instrument_id} not found in provider"))?;
 
             if !matches!(
                 instrument,
@@ -1000,10 +994,7 @@ impl DataClient for InteractiveBrokersDataClient {
             let instrument = self
                 .instrument_provider
                 .find(&instrument_id)
-                .context(format!(
-                    "Instrument {} not found in provider",
-                    instrument_id
-                ))?;
+                .context(format!("Instrument {instrument_id} not found in provider"))?;
 
             // Check if instrument is a CurrencyPair (IB doesn't support trades for CurrencyPair)
             if matches!(instrument, InstrumentAny::CurrencyPair(_)) {
@@ -1285,10 +1276,7 @@ impl DataClient for InteractiveBrokersDataClient {
             let instrument = self
                 .instrument_provider
                 .find(&instrument_id)
-                .context(format!(
-                    "Instrument {} not found in provider",
-                    instrument_id
-                ))?;
+                .context(format!("Instrument {instrument_id} not found in provider"))?;
 
             // Book levels are not rounded to the increment: two IB levels could round to one price
             let prices = IbPriceConverter::new(instrument.price_precision())
@@ -1801,7 +1789,7 @@ impl DataClient for InteractiveBrokersDataClient {
 
                             let ts_event =
                                 super::convert::ib_timestamp_to_unix_nanos(&tick.timestamp);
-                            let ts_init = clock.get_time_ns();
+                            let ts_init = ts_event;
 
                             match super::parse::parse_quote_tick(
                                 instrument_id,
@@ -1992,7 +1980,7 @@ impl DataClient for InteractiveBrokersDataClient {
 
                             let ts_event =
                                 super::convert::ib_timestamp_to_unix_nanos(&tick.timestamp);
-                            let ts_init = clock.get_time_ns();
+                            let ts_init = ts_event;
 
                             // Generate trade ID from exchange and special conditions if available
                             let trade_id = None;

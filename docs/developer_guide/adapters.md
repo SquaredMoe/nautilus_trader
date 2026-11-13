@@ -1009,10 +1009,15 @@ snapshot parsing. The shared types describe the result of validation and monitor
   reconnects. Advancing empty snapshots count as updates. Replacement uses an unsubscribe/subscribe pair on
   the existing socket. See [Derive order book recovery](../integrations/derive.md#order-book-recovery) for
   timer defaults and the notification correlation limit.
+- **Deribit**: sequences non-grouped channels by `change_id`/`prev_change_id` per instrument and
+  tracks grouped channels as snapshot-only books by exact channel. Replacement uses an
+  unsubscribe/subscribe pair on the existing socket. See
+  [Deribit sequence gap recovery](../integrations/deribit.md#sequence-gap-recovery) for timer
+  defaults and live validation.
 
 Adapters fall into two recovery families, which determine the oracle a stress harness can use:
 
-- Push (OKX, Polymarket, Lighter, Hyperliquid, Bybit, Betfair, AX Exchange, Derive): a replacement
+- Push (OKX, Polymarket, Lighter, Hyperliquid, Bybit, Betfair, AX Exchange, Derive, Deribit): a replacement
   resubscribes, and the venue stream delivers the snapshot.
 - Pull (Binance): diff streams stay subscribed. A replacement fetches a REST snapshot, and the
   adapter accepts it only when the buffered diffs continue from its `lastUpdateId` without a gap.
@@ -1188,23 +1193,24 @@ returning an empty set.
 
 #### Single-order probes
 
-`generate_order_status_report` resolves a single order. The engine issues it after the open-order
-check retries without confirming a cached order, which requires that check to run in full-history
-mode (`open_check_open_only=false`). The command carries the queried `instrument_id` and
-`client_order_id`, plus `venue_order_id` when the order has one, so support a lookup that has no
-venue identifier yet. The engine discards a report whose identity does not match the query.
+`generate_order_status_report` resolves a single order. After the missing-order retry budget, the engine
+issues it in both open-only and full-history checks. Open-only missing checks skip orders owned by in-flight
+recovery. The command carries the queried `instrument_id` and `client_order_id`, plus `venue_order_id` when
+the order has one, so support a lookup that has no venue identifier yet. The engine discards a report whose
+identity does not match the query.
 
-Distinguish absence from failure in that probe, because the engine acts on the difference:
+Distinguish absence from failure in that probe:
 
-- `Ok(None)` states that the venue answered and has no such order. The engine treats that answer as proof. It
-  resolves an accepted, submitted, or partially filled order to a terminal state. Pending cancel and update
-  states stay unresolved.
-- An error states that the lookup did not answer, so the engine defers the missing-order resolution
-  to a later cycle.
+- `Ok(Some(report))` provides status and filled quantity to reconcile, in either mode. Companion fill reports
+  supply the executions. The engine also applies reports the adapter infers from absence.
+- `Ok(None)` states that the venue answered and has no such order. Only full-history checks use that answer
+  to resolve an accepted, submitted, or partially filled order to a terminal state. Pending cancel and update
+  states stay unresolved. Open-only checks keep the order open.
+- An error states that the lookup did not answer, so the engine defers resolution to a later check.
 
-A failed lookup returned as `Ok(None)` can therefore reject or cancel an order that is live at the
-venue. The trait default returns `Ok(None)` after logging that the handler is not implemented, so
-implement this method before an open-order check runs in full-history mode.
+A failed lookup returned as `Ok(None)` can reject or cancel an order that is live at the venue in full-history
+mode. The trait default returns `Ok(None)` after logging that the handler is not implemented. Implement this
+method to support missing-order recovery; a working `query_order` handler alone does not provide it.
 
 #### Shared reconciliation changes
 
@@ -1259,10 +1265,15 @@ unapplied. Periodic and targeted reconciliation defer the affected work until a 
 
 #### Inferred fills
 
-Call the hook for every adapter-backed inferred fill: external and cached orders, continuous
-reconciliation, and targeted order recovery. If commission calculation fails, the engine may apply
-valid explicit fills, but it leaves the residual inferred quantity and dependent terminal
-transition pending.
+Adapters that require venue trade IDs and fees for every order execution return `true` from
+`ExecutionClient::requires_authoritative_fills`. Order statuses then leave missing fills and dependent
+status transitions pending until private updates or reconciliation supply venue fills. The default is
+`false`. Position-only synthetic corrections are unaffected.
+
+Call `ExecutionClient::calculate_commission` for every adapter-backed inferred fill: external and cached
+orders, continuous reconciliation, and targeted order recovery. If commission calculation fails, the
+engine may apply valid explicit fills, but it leaves the residual inferred quantity and dependent
+terminal transition pending.
 
 For an external order, calculate commission before a cache or event transition could prevent a retry. If the
 responsible execution client is unavailable, defer the inferred fill. Do not treat that missing client as an
@@ -1869,18 +1880,18 @@ The status column uses these definitions:
   is not retried.
 - **Unsafe**: An order command or another state change can be applied twice.
 
-| Adapter      | Retry gate                                            | Order commands                                                                                                       | Status         | Notes                                                                                                                                 |
-| ------------ | ----------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| Architect AX | Method allowlist: `GET`, `HEAD`, and `OPTIONS`.       | Sent once.                                                                                                           | Over-restricts | `POST /authenticate` is not retried.                                                                                                  |
-| Binance      | Method allowlist: `GET`.                              | Sent once.                                                                                                           | Over-restricts |                                                                                                                                       |
-| Betfair      | An ambiguous order retry reuses `customerRef`.        | Retried inside a 45-second budget and a 60-second `customerRef` window.                                              | Conforms       |                                                                                                                                       |
-| Bybit        | Every method, when the error is retryable.            | Demo submit, submit order list, modify, cancel, and batch cancel retry. Cancel-all retries in every environment.     | Unsafe         |                                                                                                                                       |
-| Coinbase     | Method allowlist: `GET` and `DELETE`.                 | Sent once.                                                                                                           | Over-restricts | A read-only preview `POST` is not retried.                                                                                            |
-| Derive       | Reads retry. Writes are sent once.                    | Sent once.                                                                                                           | Conforms       | Place, cancel, and replace use `send_private_write`. Cancel-all and cancel-by-label use `send_private_once`.                          |
-| Hyperliquid  | `/info` retries. `/exchange` does not.                | Sent once.                                                                                                           | Conforms       |                                                                                                                                       |
-| Kraken spot  | `send_request` retries.                               | Single cancel retries. Submit and amend are sent once. Execution cancel-all selects explicit IDs and is sent once.   | Unsafe         | `CancelAll` and `EditOrder` retry, but the execution client does not call them. A non-auth HTTP 4xx is classified as a network error. |
-| Lighter      | Order and referral writes are sent once.              | Sent once.                                                                                                           | Conforms       |                                                                                                                                       |
-| OKX          | Submit paths are exempt. Other `POST` requests retry. | Regular submit, modify, and cancel use WebSocket. Algo cancel, spread cancel, and spread cancel-all retry over HTTP. | Unsafe         |                                                                                                                                       |
+| Adapter      | Retry gate                                      | Order commands                                                                                                        | Status         | Notes                                                                                                                          |
+| ------------ | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Architect AX | Method allowlist: `GET`, `HEAD`, and `OPTIONS`. | Sent once.                                                                                                            | Over-restricts | `POST /authenticate` is not retried.                                                                                           |
+| Binance      | Method allowlist: `GET`.                        | Sent once.                                                                                                            | Over-restricts |                                                                                                                                |
+| Betfair      | An ambiguous order retry reuses `customerRef`.  | Retried inside a 45-second budget and a 60-second `customerRef` window.                                               | Conforms       |                                                                                                                                |
+| Bybit        | Method allowlist: `GET` and `HEAD`.             | Sent once.                                                                                                            | Over-restricts | Withdraw `requestId` is not a retry key.                                                                                       |
+| Coinbase     | Method allowlist: `GET` and `DELETE`.           | Sent once.                                                                                                            | Over-restricts | A read-only preview `POST` is not retried.                                                                                     |
+| Derive       | Reads retry. Writes are sent once.              | Sent once.                                                                                                            | Conforms       | Place, cancel, and replace use `send_private_write`. Cancel-all and cancel-by-label use `send_private_once`.                   |
+| Hyperliquid  | `/info` retries. `/exchange` does not.          | Sent once.                                                                                                            | Conforms       |                                                                                                                                |
+| Kraken spot  | Reads retry. Writes are sent once.              | Sent once.                                                                                                            | Conforms       | Batch submit and cancel send one request directly. Other writes use `send_request_once`. Reads also retry a non-auth HTTP 4xx. |
+| Lighter      | Order and referral writes are sent once.        | Sent once.                                                                                                            | Conforms       |                                                                                                                                |
+| OKX          | Path exemptions. Other `POST` requests retry.   | Submits, algo amend/cancel, and spread cancels send once. Regular execution submit, modify, and cancel use WebSocket. | Unsafe         | Regular HTTP amend and cancel paths still retry.                                                                               |
 
 ### Rate limiting
 
