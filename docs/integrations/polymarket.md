@@ -301,8 +301,8 @@ Locks release through either path:
   precedes startup reconciliation; discovered orders affect the next refresh.
 - **Order events**: Core order events, including reconciled events, update reservations and unsettled spend.
   Account balances change only on refresh, not on each event.
-- **Triggers**: Refreshes run at connect, on account queries, after finalized trade updates, and on user
-  WebSocket reconnect. They do not request open orders.
+- **Triggers**: Refreshes run at connect, on account queries, after finalized trade updates or user
+  `auto_redeem` events, and on user WebSocket reconnect. They do not request open orders.
 - **Reconnect and reset**: Transport reconnect preserves unsettled BUY spend; reset clears it.
 - **Response ordering**: The adapter discards responses superseded by a newer refresh or invalidated by an
   execution-client reconnect or reset. A user WebSocket reconnect retains in-flight refreshes;
@@ -2376,8 +2376,10 @@ groups book updates by instrument, then splits consecutive updates by hash. Quot
 in venue payload order.
 Each hash group emits its own [normalized book delta batch](#price-change-bursts).
 
-Both book output modes reject input older than a retained timestamp mark. Incremental input advances
-it even while gated; snapshots advance it only after validation and acceptance.
+Both book output modes reject input older than a retained timestamp mark, except during recovery
+when a snapshot matches the newest withheld update's non-empty hash. The snapshot cannot predate
+the published book. Incremental input advances the mark even while gated; snapshots advance it only
+after validation and acceptance.
 
 - Book-delta unsubscribe, shard reconnect, and tick-size changes reset the mark.
 - Recovery subscription cycles retain it.
@@ -2436,8 +2438,8 @@ messages, so a size update with a slightly earlier venue timestamp is still acce
 The adapter ignores events older than the cached quote or, with effective deltas, the local
 book. It also rejects locked, crossed, out-of-range, and off-grid events.
 
-With a book delta subscription, both modes also discard snapshots older than the book's retained
-timestamp mark before quote processing. A snapshot rejected by book hash validation emits no quote.
+With a book delta subscription, both modes apply the book timestamp rules above before quote
+processing. A snapshot rejected by book hash validation emits no quote.
 
 An empty price, a bid at or below zero, or an ask at or above one is a missing side. By default,
 `drop_quotes_missing_side` drops the event. When missing sides are allowed, the missing price uses
