@@ -515,6 +515,7 @@ pub(super) fn make_crypto_option(
             .raw_symbol(raw_symbol)
             .underlying(underlying)
             .quote_currency(quote)
+            .strike_currency(quote)
             .settlement_currency(settlement)
             .is_inverse(false)
             .option_kind(kind)
@@ -732,7 +733,10 @@ pub(super) fn register_quote_catalog_with_quotes(
     interval: Option<(u64, u64)>,
 ) -> CatalogTempDir {
     let catalog_dir = CatalogTempDir::new(label);
-    let catalog = ParquetDataCatalog::new(catalog_dir.path(), None, None, None, None);
+    let catalog = ParquetDataCatalog::builder()
+        .uri(catalog_dir.path())
+        .build()
+        .unwrap();
 
     let (start, end) = match interval {
         Some((s, e)) => (Some(UnixNanos::from(s)), Some(UnixNanos::from(e))),
@@ -752,7 +756,10 @@ pub(super) fn register_trade_catalog_with_trades(
     interval: Option<(u64, u64)>,
 ) -> CatalogTempDir {
     let catalog_dir = CatalogTempDir::new(label);
-    let catalog = ParquetDataCatalog::new(catalog_dir.path(), None, None, None, None);
+    let catalog = ParquetDataCatalog::builder()
+        .uri(catalog_dir.path())
+        .build()
+        .unwrap();
 
     let (start, end) = match interval {
         Some((s, e)) => (Some(UnixNanos::from(s)), Some(UnixNanos::from(e))),
@@ -799,6 +806,20 @@ pub(super) fn split_delta(instrument_id: InstrumentId, ts: u64) -> OrderBookDelt
         .build()
 }
 
+// A terminal envelope without a payload yields an empty entry
+pub(super) fn delivered_book_deltas(
+    saver: &TypedMessageSavingHandler<DataResponseEnvelope>,
+) -> Vec<Vec<OrderBookDelta>> {
+    saver
+        .get_messages()
+        .iter()
+        .map(|envelope| match envelope.response() {
+            Some(DataResponse::BookDeltas(response)) => response.data.to_vec(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
 #[cfg(feature = "streaming")]
 pub(super) fn register_deltas_catalog_with_deltas(
     data_engine: &mut DataEngine,
@@ -807,7 +828,10 @@ pub(super) fn register_deltas_catalog_with_deltas(
     interval: Option<(u64, u64)>,
 ) -> CatalogTempDir {
     let catalog_dir = CatalogTempDir::new(label);
-    let catalog = ParquetDataCatalog::new(catalog_dir.path(), None, None, None, None);
+    let catalog = ParquetDataCatalog::builder()
+        .uri(catalog_dir.path())
+        .build()
+        .unwrap();
 
     let (start, end) = match interval {
         Some((s, e)) => (Some(UnixNanos::from(s)), Some(UnixNanos::from(e))),

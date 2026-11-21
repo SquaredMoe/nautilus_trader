@@ -418,7 +418,7 @@ fn test_process_order_when_instrument_already_expired(
     // Set current timestamp ns to be higher than es instrument activation (1.1.2024)
     test_clock
         .borrow_mut()
-        .set_time(UnixNanos::from(1704067200000000000));
+        .set_time(UnixNanos::from(1_704_067_200_000_000_000));
 
     let mut engine = get_order_matching_engine(instrument, Some(test_clock), None, None, None);
 
@@ -629,7 +629,7 @@ fn test_process_order_when_invalid_price_precision(
     // Set current timestamp ns to be higher than es instrument activation (1.1.2024)
     test_clock
         .borrow_mut()
-        .set_time(UnixNanos::from(1704067200000000000));
+        .set_time(UnixNanos::from(1_704_067_200_000_000_000));
     let mut engine =
         get_order_matching_engine(instrument_es.clone(), Some(test_clock), None, None, None);
 
@@ -667,7 +667,7 @@ fn test_process_order_when_invalid_trigger_price_precision(
     // Set current timestamp ns to be higher than es instrument activation (1.1.2024)
     test_clock
         .borrow_mut()
-        .set_time(UnixNanos::from(1704067200000000000));
+        .set_time(UnixNanos::from(1_704_067_200_000_000_000));
     let mut engine =
         get_order_matching_engine(instrument_es.clone(), Some(test_clock), None, None, None);
     let mut stop_order = OrderTestBuilder::new(OrderType::StopMarket)
@@ -1193,7 +1193,7 @@ fn test_process_order_when_invalid_contingent_orders(
     // Set current timestamp ns to be higher than es instrument activation (1.1.2024)
     test_clock
         .borrow_mut()
-        .set_time(UnixNanos::from(1704067200000000000));
+        .set_time(UnixNanos::from(1_704_067_200_000_000_000));
     let mut engine = get_order_matching_engine(
         instrument_es.clone(),
         Some(test_clock),
@@ -1267,7 +1267,7 @@ fn test_process_order_when_closed_linked_order(
     // Set current timestamp ns to be higher than es instrument activation (1.1.2024)
     test_clock
         .borrow_mut()
-        .set_time(UnixNanos::from(1704067200000000000));
+        .set_time(UnixNanos::from(1_704_067_200_000_000_000));
     let cache = Rc::new(RefCell::new(Cache::default()));
     let mut engine = get_order_matching_engine(
         instrument_es.clone(),
@@ -13363,7 +13363,7 @@ fn test_l1_queue_position_deep_order_deferred_snapshot(
 #[rstest]
 #[case(OrderSide::Buy, AggressorSide::Sell, "54.59")]
 #[case(OrderSide::Sell, AggressorSide::Buy, "54.62")]
-fn test_l1_identical_trade_ticks_have_independent_fill_budgets(
+fn test_l1_identical_trades_have_independent_fill_budgets(
     account_id: AccountId,
     instrument_eth_usdt: InstrumentAny,
     #[case] side: OrderSide,
@@ -17405,7 +17405,9 @@ fn option_contract(
         .underlying(Ustr::from(underlying))
         .option_kind(kind)
         .strike_price(Price::from("149.00"))
-        .currency(Currency::USD())
+        .quote_currency(Currency::USD())
+        .settlement_currency(Currency::USD())
+        .strike_currency(Currency::USD())
         .activation_ns(UnixNanos::from(0))
         .expiration_ns(expiration_ns)
         .price_precision(2)
@@ -17424,6 +17426,7 @@ fn crypto_option_call_btc(venue: &str, expiration_ns: UnixNanos, strike: Price) 
         .raw_symbol(Symbol::from("BTC-OPT-CALL"))
         .underlying(Currency::from("BTC"))
         .quote_currency(Currency::from("USD"))
+        .strike_currency(Currency::from("USD"))
         .settlement_currency(Currency::from("BTC"))
         .is_inverse(false)
         .option_kind(OptionKind::Call)

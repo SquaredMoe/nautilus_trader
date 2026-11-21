@@ -665,6 +665,7 @@ impl Portfolio {
                 .positions(Some(venue), None, None, None, None)
                 .iter()
                 .any(|position| cache.account(&position.account_id).is_some());
+
             if !has_position_account {
                 log::error!("Cannot calculate net exposures: no account registered for {venue}");
                 return None;
@@ -2223,6 +2224,10 @@ impl Portfolio {
     /// Aggregates balances across every account, includes cached positions and their snapshots, and
     /// merges close-time PnLs recorded during processing. Recomputes on each call; callers on hot paths
     /// should invoke it sparingly.
+    ///
+    /// Logs and omits PnL statistics for currencies with unrepresentable balance totals.
+    /// Also logs and omits PnL statistics and equity series that need unsupported float precision.
+    /// Use [`Self::try_analyzer`] to receive an error.
     #[must_use]
     pub fn statistics(&self) -> PortfolioStatistics {
         self.analyzer().statistics()
@@ -2235,8 +2240,48 @@ impl Portfolio {
     /// so custom registrations participate. Every analysis path builds its analyzer here, so a
     /// new caller cannot omit the registrations. Recomputes on each call; callers on hot paths
     /// should invoke it sparingly.
+    ///
+    /// Aggregates balances and handles unsupported inputs as described in
+    /// [`PortfolioAnalyzer::from_accounts_with_snapshots`]. Use [`Self::try_analyzer`] to receive an error.
     #[must_use]
     pub fn analyzer(&self) -> PortfolioAnalyzer {
+        let mut analyzer = self.build_analyzer(|accounts, positions, history, snapshots, pnls| {
+            PortfolioAnalyzer::from_accounts_with_snapshots(
+                accounts, positions, history, snapshots, pnls,
+            )
+        });
+
+        analyzer.replace_statistics(self.registered_statistics());
+        analyzer
+    }
+
+    /// Builds an analyzer from the current accounts, positions, and portfolio snapshots.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if [`PortfolioAnalyzer::try_from_accounts_with_snapshots`] fails.
+    pub fn try_analyzer(&self) -> anyhow::Result<PortfolioAnalyzer> {
+        let mut analyzer =
+            self.build_analyzer(|accounts, positions, history, snapshots, pnls| {
+                PortfolioAnalyzer::try_from_accounts_with_snapshots(
+                    accounts, positions, history, snapshots, pnls,
+                )
+            })?;
+
+        analyzer.replace_statistics(self.registered_statistics());
+        Ok(analyzer)
+    }
+
+    fn build_analyzer<T>(
+        &self,
+        build: impl FnOnce(
+            &[AccountAny],
+            &[Position],
+            &[Position],
+            Vec<&PortfolioSnapshot>,
+            AHashMap<Currency, Vec<(PositionId, UnixNanos, f64)>>,
+        ) -> T,
+    ) -> T {
         let cache = self.cache.borrow();
         let accounts = cache.accounts_all_owned();
         let positions: Vec<Position> = cache
@@ -2256,16 +2301,13 @@ impl Portfolio {
             .values()
             .flat_map(|ring| ring.iter())
             .collect::<Vec<_>>();
-        let mut analyzer = PortfolioAnalyzer::from_accounts_with_snapshots(
+        build(
             &accounts,
             &positions,
             &snapshots,
             portfolio_snapshots,
             recorded,
-        );
-        analyzer.replace_statistics(inner.analyzer.statistics.clone());
-
-        analyzer
+        )
     }
 
     /// Returns the statistics registered for portfolio and backtest analysis.

@@ -2543,6 +2543,7 @@ mod tests {
             &[],
         ),
         cache_mutation("cache_all", CacheMutationRecoveryClass::SnapshotOwned, &[]),
+        cache_mutation("reload", CacheMutationRecoveryClass::SnapshotOwned, &[]),
         cache_mutation(
             "cache_currencies",
             CacheMutationRecoveryClass::SnapshotOwned,
@@ -2630,6 +2631,11 @@ mod tests {
         ),
         cache_mutation(
             "clear_index",
+            CacheMutationRecoveryClass::SnapshotOwned,
+            &[],
+        ),
+        cache_mutation(
+            "clear_own_order_books",
             CacheMutationRecoveryClass::SnapshotOwned,
             &[],
         ),

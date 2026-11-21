@@ -1464,17 +1464,22 @@ async fn streamed_response_does_not_negotiate_encoding() {
     assert_eq!(got, body, "streams must hand back wire bytes unchanged");
 }
 
+#[rstest]
+#[case::nonempty(b"abc".as_slice())]
+#[case::empty(b"".as_slice())]
 #[tokio::test]
-async fn unsupported_content_encoding_is_an_error() {
+async fn unsupported_content_encoding_is_an_error(#[case] body: &'static [u8]) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let peer = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         read_headers(&mut stream).await;
-        stream
-            .write_all(b"HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: 3\r\n\r\nabc")
-            .await
-            .unwrap();
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Encoding: br\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).await.unwrap();
+        stream.write_all(body).await.unwrap();
     });
 
     let client = HttpClient::builder()
@@ -1495,21 +1500,84 @@ async fn unsupported_content_encoding_is_an_error() {
 }
 
 #[rstest]
-#[case::empty(b"".as_slice())]
-#[case::invalid(b"nope".as_slice())]
+#[case::ok(200)]
+#[case::rate_limited(429)]
+#[case::unavailable(503)]
 #[tokio::test]
-async fn corrupt_gzip_body_is_an_error(#[case] body: &'static [u8]) {
+async fn empty_gzip_response_preserves_status_and_headers(
+    #[case] status: u16,
+    #[values(
+        "Content-Length: 0\r\n\r\n",
+        "Transfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+        "Connection: close\r\n\r\n"
+    )]
+    framing: &str,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let head = format!(
+        "HTTP/1.1 {status} Response\r\nContent-Encoding: gzip\r\nRetry-After: 7\r\n{framing}"
+    );
+
+    let peer = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        read_headers(&mut stream).await;
+        stream.write_all(head.as_bytes()).await.unwrap();
+    });
+
+    let client = HttpClient::builder()
+        .use_system_proxy(false)
+        .timeout_secs(3)
+        .header_keys(vec![
+            "Content-Encoding".into(),
+            "Content-Length".into(),
+            "Retry-After".into(),
+        ])
+        .build()
+        .unwrap();
+
+    let response = send(&client, Method::GET, format!("http://{addr}/empty"), None)
+        .await
+        .unwrap();
+    peer.await.unwrap();
+
+    let mut headers = HashMap::from([
+        ("Content-Encoding".into(), "gzip".into()),
+        ("Retry-After".into(), "7".into()),
+    ]);
+
+    if framing.starts_with("Content-Length:") {
+        headers.insert("Content-Length".into(), "0".into());
+    }
+
+    assert_eq!(response.status.as_u16(), status);
+    assert_eq!(response.headers, headers);
+    assert_eq!(response.body, Bytes::new());
+}
+
+#[rstest]
+#[case::invalid(b"nope".to_vec())]
+#[case::truncated({
+    let mut body = gzip(b"payload");
+    body.truncate(body.len() - 8);
+    body
+})]
+#[tokio::test]
+async fn corrupt_gzip_body_is_an_error(
+    #[case] body: Vec<u8>,
+    #[values(200, 429, 503)] status: u16,
+) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let peer = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         read_headers(&mut stream).await;
         let head = format!(
-            "HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+            "HTTP/1.1 {status} Response\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
             body.len()
         );
         stream.write_all(head.as_bytes()).await.unwrap();
-        stream.write_all(body).await.unwrap();
+        stream.write_all(&body).await.unwrap();
     });
 
     let client = HttpClient::builder()
@@ -1530,8 +1598,57 @@ async fn corrupt_gzip_body_is_an_error(#[case] body: &'static [u8]) {
 }
 
 #[tokio::test]
-async fn decoded_body_drops_encoding_and_wire_length_headers() {
-    let payload = b"decoded-payload";
+async fn header_observer_runs_before_a_body_decode_error() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (observed, body_ready) = tokio::sync::oneshot::channel();
+
+    let peer = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = read_headers(&mut stream).await.to_ascii_lowercase();
+        assert!(request.starts_with("get /corrupt?limit=1 http/1.1\r\n"));
+        assert!(request.contains("\r\nx-referrer: test-client\r\n"));
+        stream
+            .write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 2\r\nContent-Encoding: gzip\r\nContent-Length: 4\r\n\r\n")
+            .await
+            .unwrap();
+        body_ready.await.unwrap();
+        stream.write_all(b"nope").await.unwrap();
+    });
+
+    let client = HttpClient::builder()
+        .use_system_proxy(false)
+        .timeout_secs(3)
+        .build()
+        .unwrap();
+
+    let error = client
+        .get_with_params_on_headers(
+            &format!("http://{addr}/corrupt"),
+            &[("limit", 1)],
+            Some(HashMap::from([("X-Referrer".into(), "test-client".into())])),
+            |status, headers| {
+                assert_eq!(status.as_u16(), 429);
+                assert_eq!(headers["retry-after"], "2");
+                observed.send(()).unwrap();
+            },
+        )
+        .await
+        .unwrap_err();
+
+    peer.await.unwrap();
+
+    assert!(
+        matches!(error, HttpClientError::Error(ref message) if message.contains("failed to decode gzip response body")),
+        "{error:?}"
+    );
+}
+
+#[rstest]
+#[case::nonempty(b"decoded-payload".as_slice())]
+#[case::empty(b"".as_slice())]
+#[tokio::test]
+async fn decoded_body_drops_encoding_and_wire_length_headers(#[case] payload: &'static [u8]) {
     let body = gzip(payload);
     let served = body.clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1750,8 +1867,14 @@ async fn gzip_members_are_decoded_and_bounded(
 async fn unsupported_encoding_chains_are_rejected(
     #[case] encoding_headers: &str,
     #[case] expected: &str,
+    #[values(false, true)] empty_body: bool,
 ) {
-    let body = gzip(&gzip(b"decoded-payload"));
+    let body = if empty_body {
+        Vec::new()
+    } else {
+        gzip(&gzip(b"decoded-payload"))
+    };
+
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let head = format!(

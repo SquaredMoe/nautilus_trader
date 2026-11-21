@@ -99,6 +99,7 @@ mod tests {
             AccountId, ClientOrderId, PositionId,
             stubs::{instrument_id_aud_usd_sim, strategy_id_ema_cross, trader_id},
         },
+        position::PositionReplayEvents,
         stubs::TestDefault,
         types::{Currency, Quantity},
     };
@@ -111,7 +112,7 @@ mod tests {
     fn create_closed_position(entry: OrderSide) -> Position {
         Position {
             events: Vec::new(),
-            replay_events: Vec::new(),
+            replay_events: PositionReplayEvents::default(),
             fill_voids: Vec::new(),
             trader_id: trader_id(),
             strategy_id: strategy_id_ema_cross(),
@@ -153,6 +154,8 @@ mod tests {
             instrument_class: InstrumentClass::Spot,
             is_currency_pair: true,
             allows_negative_price: Some(false),
+            inverse_gross_pnl_closed: 0.into(),
+            inverse_entry_notional_closed: 0.into(),
         }
     }
 

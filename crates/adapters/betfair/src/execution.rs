@@ -1431,6 +1431,7 @@ impl ExecutionClient for BetfairExecutionClient {
                 .stream_client
                 .as_ref()
                 .is_some_and(|client| client.is_order_ready());
+
         if !connected {
             return false;
         }
@@ -3846,12 +3847,6 @@ impl ReconciliationGate {
         }
     }
 
-    #[cfg(test)]
-    fn try_resume(&self, generation: u64) -> bool {
-        let _commit = self.commit_lock.lock();
-        self.try_resume_locked(generation)
-    }
-
     fn try_resume_locked(&self, generation: u64) -> bool {
         generation != u64::MAX
             && generation & 1 == 1
@@ -4829,6 +4824,7 @@ fn replaced_leg_fills_from_candidates(
             .resolve_order_owner(candidate.customer_order_ref.as_deref(), &candidate.bet_id)
             .and_then(CustomerOrderRefResolution::client_order_id)
             .is_some_and(|client_order_id| client_order_id == owner_client_order_id);
+
         if !resolves_to_owner {
             continue;
         }
@@ -6578,7 +6574,7 @@ mod tests {
             status: crate::common::enums::StreamingOrderStatus::ExecutionComplete,
             pt: Some(crate::common::enums::StreamingPersistenceType::Lapse),
             ot: crate::common::enums::StreamingOrderType::Limit,
-            pd: 1617863365000,
+            pd: 1_617_863_365_000,
             bsp: None,
             rfo,
             rfs: None,
@@ -6609,7 +6605,7 @@ mod tests {
             status: crate::common::enums::StreamingOrderStatus::ExecutionComplete,
             pt: Some(crate::common::enums::StreamingPersistenceType::MarketOnClose),
             ot: crate::common::enums::StreamingOrderType::MarketOnClose,
-            pd: 1789423573000,
+            pd: 1_789_423_573_000,
             bsp: Some(Decimal::new(2, 0)),
             rfo,
             rfs: None,
@@ -7833,7 +7829,7 @@ mod tests {
             status: crate::common::enums::StreamingOrderStatus::Executable,
             pt: Some(crate::common::enums::StreamingPersistenceType::Lapse),
             ot: crate::common::enums::StreamingOrderType::Limit,
-            pd: 1617863365000,
+            pd: 1_617_863_365_000,
             bsp: None,
             rfo,
             rfs: None,
@@ -8758,7 +8754,11 @@ mod tests {
 
         assert_ne!(current, stale);
         assert_eq!(reconciliation_gate.current_generation(), current);
-        assert!(!reconciliation_gate.try_resume(stale));
+        assert!(
+            !reconciliation_gate
+                .commit(stale, || panic!("stale reconciliation must not publish"))
+                .unwrap()
+        );
 
         handler(stream_decode(br#"{"op":"ocm","id":2,"pt":1004,"ct":"HEARTBEAT"}"#).unwrap());
         assert_eq!(reconnect_rx.try_recv().unwrap(), current);
@@ -8802,9 +8802,13 @@ mod tests {
         let current = gate.halt();
 
         assert!(gate.is_halted());
-        assert!(!gate.try_resume(stale));
+        assert!(
+            !gate
+                .commit(stale, || panic!("stale reconciliation must not publish"))
+                .unwrap()
+        );
         assert!(gate.is_halted());
-        assert!(gate.try_resume(current));
+        assert!(gate.commit(current, || Ok(())).unwrap());
         assert!(!gate.is_halted());
     }
 
@@ -10481,6 +10485,7 @@ mod tests {
         let fills = replaced_leg_fills_from_candidates(&candidates, &candidates[1], &state);
         assert!(!fills.matched.is_zero());
         let reduced_quantity = state.reduced_quantity(&new_order.bet_id);
+
         if !fills.matched.is_zero()
             && let Some(quantity) = reduced_quantity
         {
@@ -10891,7 +10896,7 @@ mod tests {
             status: crate::common::enums::StreamingOrderStatus::Executable,
             pt: Some(crate::common::enums::StreamingPersistenceType::Lapse),
             ot: crate::common::enums::StreamingOrderType::Limit,
-            pd: 1617863365000,
+            pd: 1_617_863_365_000,
             bsp: None,
             rfo: Some("O-FILL-001".to_string()),
             rfs: None,
@@ -11203,7 +11208,7 @@ mod tests {
             status: crate::common::enums::StreamingOrderStatus::ExecutionComplete,
             pt: Some(crate::common::enums::StreamingPersistenceType::Lapse),
             ot: crate::common::enums::StreamingOrderType::Limit,
-            pd: 1617863365000,
+            pd: 1_617_863_365_000,
             bsp: None,
             rfo: None,
             rfs: None,
@@ -11243,7 +11248,7 @@ mod tests {
             status: crate::common::enums::StreamingOrderStatus::Executable,
             pt: Some(crate::common::enums::StreamingPersistenceType::Lapse),
             ot: crate::common::enums::StreamingOrderType::Limit,
-            pd: 1617863365000,
+            pd: 1_617_863_365_000,
             bsp: None,
             rfo: Some("O-SEED-001".to_string()),
             rfs: None,
@@ -11318,7 +11323,7 @@ mod tests {
             status: crate::common::enums::StreamingOrderStatus::Executable,
             pt: Some(crate::common::enums::StreamingPersistenceType::Persist),
             ot: crate::common::enums::StreamingOrderType::Limit,
-            pd: 1617863365000,
+            pd: 1_617_863_365_000,
             bsp: None,
             rfo: Some("O-INC-001".to_string()),
             rfs: None,
@@ -11381,7 +11386,7 @@ mod tests {
             status: crate::common::enums::StreamingOrderStatus::Executable,
             pt: Some(crate::common::enums::StreamingPersistenceType::Lapse),
             ot: crate::common::enums::StreamingOrderType::Limit,
-            pd: 1617863365000,
+            pd: 1_617_863_365_000,
             bsp: None,
             rfo: None,
             rfs: None,

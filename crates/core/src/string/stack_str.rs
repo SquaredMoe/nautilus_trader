@@ -499,7 +499,7 @@ mod tests {
     #[rstest]
     #[should_panic(expected = "Invalid UTF-8 in C string")]
     fn test_from_c_ptr_invalid_utf8_panics() {
-        let bytes = vec![0xFF];
+        let bytes = vec![0xff];
         let cstring = unsafe { std::ffi::CString::from_vec_unchecked(bytes) };
         let _ = unsafe { StackStr::from_c_ptr(cstring.as_ptr()) };
     }
@@ -542,6 +542,7 @@ mod tests {
             a.hash(&mut h);
             h.finish()
         };
+
         let hash_b = {
             let mut h = DefaultHasher::new();
             b.hash(&mut h);
@@ -787,6 +788,7 @@ mod tests {
             a.hash(&mut h);
             h.finish()
         };
+
         let hash_b = {
             let mut h = DefaultHasher::new();
             b.hash(&mut h);
@@ -806,6 +808,7 @@ mod tests {
             a.hash(&mut h);
             h.finish()
         };
+
         let hash_b = {
             let mut h = DefaultHasher::new();
             b.hash(&mut h);

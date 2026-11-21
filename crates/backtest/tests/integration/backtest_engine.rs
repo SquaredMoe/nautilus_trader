@@ -50,6 +50,8 @@ use nautilus_indicators::{
     average::ema::ExponentialMovingAverage,
     indicator::{Indicator, MovingAverage},
 };
+#[cfg(feature = "defi")]
+use nautilus_model::enums::CurrencyType;
 use nautilus_model::{
     accounts::{Account, AccountAny},
     data::{
@@ -1113,6 +1115,94 @@ fn create_engine_with_config(
     engine
 }
 
+#[cfg(feature = "defi")]
+#[rstest]
+#[case(16, true)]
+#[case(17, false)]
+#[case(18, false)]
+fn test_backtest_analysis_checks_engine_held_balance_precision(
+    crypto_perpetual_ethusdt: CryptoPerpetual,
+    #[case] precision: u8,
+    #[case] supported: bool,
+    #[values(false, true)] streaming: bool,
+) {
+    let config = BacktestEngineConfig {
+        bypass_logging: true,
+        run_analysis: true,
+        ..Default::default()
+    };
+
+    let mut engine = BacktestEngine::new(config).unwrap();
+
+    let currency = Currency::new(
+        "TST-ANALYSIS",
+        precision,
+        0,
+        "Test balance",
+        CurrencyType::Crypto,
+    );
+
+    let exact_amount = dec!(1000) + Decimal::new(1, u32::from(precision));
+    let balance = Money::from_decimal(exact_amount, currency).unwrap();
+    let venue_config = SimulatedVenueConfig::builder()
+        .venue(Venue::from("BINANCE"))
+        .oms_type(OmsType::Netting)
+        .account_type(AccountType::Margin)
+        .book_type(BookType::L1_MBP)
+        .starting_balances(vec![balance])
+        .fee_model(FeeModelAny::MakerTaker(MakerTakerFeeModel::zero()).into())
+        .build()
+        .unwrap();
+    engine.add_venue(venue_config).unwrap();
+    let instrument = InstrumentAny::CryptoPerpetual(crypto_perpetual_ethusdt);
+    let id = instrument.id();
+    engine.add_instrument(&instrument).unwrap();
+    let quotes = vec![
+        quote(id, "1000.00", "1001.00", 1),
+        quote(id, "1000.00", "1001.00", 2),
+    ];
+    engine.add_data(quotes, None, true, true).unwrap();
+
+    let run = engine.run(None, None, None, streaming);
+    let completed = if streaming {
+        run.unwrap();
+        engine.end()
+    } else {
+        run
+    };
+
+    let result = engine.try_get_result();
+    let portfolio = engine.kernel().portfolio();
+    let analyzer = portfolio.try_analyzer();
+    let exact_analyzer = portfolio.analyzer();
+
+    if supported {
+        completed.unwrap();
+        assert_eq!(
+            result.unwrap().stats_pnls[currency.code.as_str()]["PnL (total)"],
+            0.0
+        );
+        assert_eq!(analyzer.unwrap().account_balances[&currency], balance);
+    } else {
+        let expected = format!(
+            "Cannot analyze TST-ANALYSIS balance for BINANCE-001: Fixed-point precision {precision} exceeds maximum float precision 16"
+        );
+        assert_eq!(
+            completed.unwrap_err().to_string(),
+            format!(
+                "Backtest completed, but portfolio analysis failed. Disable run_analysis to skip post-run analysis. {expected}"
+            ),
+        );
+        assert_eq!(result.unwrap_err().to_string(), expected);
+        assert_eq!(analyzer.unwrap_err().to_string(), expected);
+    }
+
+    assert_eq!(exact_analyzer.account_balances[&currency], balance);
+    assert_eq!(exact_analyzer.account_balances_starting[&currency], balance);
+    assert_eq!(engine.get_result().iterations, 2);
+    assert!(engine.run_finished().is_some());
+}
+
 #[rstest]
 fn test_add_custom_data_bypasses_market_setup_and_replays_in_order(
     crypto_perpetual_ethusdt: CryptoPerpetual,
@@ -1265,7 +1355,9 @@ fn option_contract(venue: Venue, expiration_ns: UnixNanos) -> InstrumentAny {
             .underlying(Ustr::from("AAPL"))
             .option_kind(OptionKind::Call)
             .strike_price(Price::from("150.00"))
-            .currency(Currency::USD())
+            .quote_currency(Currency::USD())
+            .settlement_currency(Currency::USD())
+            .strike_currency(Currency::USD())
             .activation_ns(UnixNanos::default())
             .expiration_ns(expiration_ns)
             .price_precision(2)
@@ -1756,7 +1848,7 @@ fn test_add_strategies_stops_at_first_error() {
 }
 
 #[rstest]
-fn test_run_processes_quote_ticks(crypto_perpetual_ethusdt: CryptoPerpetual) {
+fn test_run_processes_quotes(crypto_perpetual_ethusdt: CryptoPerpetual) {
     let mut engine = create_engine();
     let instrument = InstrumentAny::CryptoPerpetual(crypto_perpetual_ethusdt);
     let instrument_id = instrument.id();

@@ -746,7 +746,7 @@ pub fn parse_orderbook_deltas_with_flag(
 /// # Errors
 ///
 /// Returns an error if price/size/timestamp parsing fails.
-pub fn parse_trade_ticks(
+pub fn parse_trades(
     instrument_id: InstrumentId,
     instrument: &InstrumentAny,
     contents: &DydxTradeContents,
@@ -922,8 +922,8 @@ mod tests {
             open_interest: dec!(1000),
             atomic_resolution: -10,
             quantum_conversion_exponent: -9,
-            subticks_per_tick: 1000000,
-            step_base_quantums: 1000000,
+            subticks_per_tick: 1_000_000,
+            step_base_quantums: 1_000_000,
             is_reduce_only: false,
         }
     }
@@ -954,9 +954,9 @@ mod tests {
                 .size_increment(Quantity::new(0.001, 8))
                 .multiplier(Quantity::new(1.0, 0))
                 .lot_size(Quantity::new(0.001, 8))
-                .max_quantity(Quantity::new(100000.0, 8))
+                .max_quantity(Quantity::new(100_000.0, 8))
                 .min_quantity(Quantity::new(0.001, 8))
-                .max_price(Price::new(1000000.0, 2))
+                .max_price(Price::new(1_000_000.0, 2))
                 .min_price(Price::new(0.01, 2))
                 .margin_init(rust_decimal_macros::dec!(0.05))
                 .margin_maint(rust_decimal_macros::dec!(0.03))
@@ -1927,7 +1927,7 @@ mod tests {
     }
 
     #[rstest]
-    fn test_parse_trade_ticks_ws() {
+    fn test_parse_trades_ws() {
         let json = load_json_fixture("ws_trades_subscribed.json");
         let contents: DydxTradeContents = serde_json::from_value(json["contents"].clone())
             .expect("Failed to parse trade contents");
@@ -1936,7 +1936,7 @@ mod tests {
         let instrument_id = instrument.id();
         let ts_init = UnixNanos::from(1_000_000_000u64);
 
-        let ticks = parse_trade_ticks(instrument_id, &instrument, &contents, ts_init)
+        let ticks = parse_trades(instrument_id, &instrument, &contents, ts_init)
             .expect("Failed to parse trade ticks");
 
         assert_eq!(ticks.len(), 1);

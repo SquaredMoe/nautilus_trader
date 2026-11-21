@@ -39,10 +39,13 @@ use nautilus_common::{
     component::Component,
     enums::Environment,
     factories::{ClientConfig, DataClientFactory, ExecutionClientFactory},
-    live::{LiveClock, dst, runner::get_exec_event_sender},
+    live::{
+        LiveClock, dst,
+        runner::{get_data_event_sender, get_exec_event_sender},
+    },
     logging::{logger::LoggerConfig, logging_sync_to_disk, writer::FileWriterConfig},
     messages::{
-        ExecutionEvent,
+        DataEvent, ExecutionEvent,
         execution::{
             GenerateFillReports, GenerateOrderStatusReport, GenerateOrderStatusReports,
             GeneratePositionStatusReports, QueryOrder, TradingCommand,
@@ -70,7 +73,10 @@ use nautilus_model::{
         AccountId, ActorId, ClientId, ClientOrderId, ExecAlgorithmId, InstrumentId, PositionId,
         StrategyId, TradeId, TraderId, Venue, VenueOrderId,
     },
-    instruments::{Instrument, InstrumentAny, stubs::crypto_perpetual_ethusdt},
+    instruments::{
+        Instrument, InstrumentAny,
+        stubs::{crypto_perpetual_ethusdt, currency_pair_btcusdt},
+    },
     orders::{
         Order, OrderAny, OrderTestBuilder,
         stubs::{OrderFilledTestBuilder, TestOrderEventStubs},
@@ -1235,7 +1241,6 @@ pub(crate) mod serial_tests {
             cmd: GenerateFillReports,
         ) -> anyhow::Result<Vec<FillReport>> {
             let request_count = self.state.fill_report_count.fetch_add(1, Ordering::Relaxed) + 1;
-
             if request_count == 1
                 && let Some(release) = &self.fill_report_release
             {
@@ -1243,7 +1248,6 @@ pub(crate) mod serial_tests {
             }
 
             let mut responses = self.fill_report_responses.lock();
-
             let mut reports = if responses.len() > 1 {
                 responses.pop_front().unwrap()
             } else {
@@ -1255,7 +1259,6 @@ pub(crate) mod serial_tests {
             // test asserting fill application must respond inside the window.
             if self.fill_reports_at_window_end {
                 let window_end = cmd.end.unwrap_or(cmd.ts_init);
-
                 for report in &mut reports {
                     report.ts_event = window_end;
                     report.ts_init = window_end;
@@ -1322,7 +1325,6 @@ pub(crate) mod serial_tests {
 
                     *state.report_thread.lock() = Some(std::thread::current().id());
                     Self::run_report_cpu(&state, request_count);
-
                     if order_reports_complete {
                         state
                             .report_response_returned
@@ -1678,7 +1680,6 @@ pub(crate) mod serial_tests {
 
     fn apply_reconciliation_events(node: &mut LiveNode, events: &[OrderEventAny]) {
         let exec_engine = node.kernel().exec_engine().clone();
-
         for event in events {
             exec_engine.borrow_mut().process(event);
             if let OrderEventAny::Filled(fill) = event {
@@ -2762,6 +2763,7 @@ pub(crate) mod serial_tests {
                 ts,
                 None, // correlation_id
             );
+
             msgbus::publish_any(
                 MessagingSwitchboard::shutdown_system_topic(),
                 command.as_any(),
@@ -2790,7 +2792,6 @@ pub(crate) mod serial_tests {
         let mut node = LiveNode::build("TestNode".to_string(), Some(config)).unwrap();
         let handle = node.handle();
         let state_handle = handle.clone();
-
         let log_thread = std::thread::spawn(move || {
             wait_until(|| state_handle.is_running(), Duration::from_secs(5));
             log::error!("LiveNode shutdown-on-error smoke test");
@@ -3309,6 +3310,162 @@ pub(crate) mod serial_tests {
 
     #[rstest]
     #[tokio::test]
+    async fn test_start_reconciles_order_for_instrument_sent_during_exec_connect() {
+        let config = LiveNodeConfig {
+            exec_engine: LiveExecutionEngineConfig {
+                reconciliation: true,
+                ..Default::default()
+            },
+            delay_post_stop: Duration::ZERO,
+            timeout_disconnection: Duration::from_millis(50),
+            ..Default::default()
+        };
+
+        let (mut node, state) = live_node_with_startup_mass_status_client(
+            "ExecConnectInstrumentStartup",
+            config,
+            StartupMassStatusBehavior::Available,
+        );
+        let instrument = InstrumentAny::CryptoPerpetual(crypto_perpetual_ethusdt());
+        let instrument_id = instrument.id();
+        let client_id = ClientId::from(StartupMassStatusExecutionClient::CLIENT_ID);
+        let account_id = AccountId::from("STARTUP-MASS-STATUS-001");
+        let client_order_id = ClientOrderId::from("O-EXEC-CONNECT");
+        let venue_order_id = VenueOrderId::from("V-EXEC-CONNECT");
+        let report = test_order_report(
+            account_id,
+            client_order_id,
+            venue_order_id,
+            OrderStatus::Accepted,
+        );
+
+        let mut mass_status = ExecutionMassStatus::new(
+            client_id,
+            account_id,
+            instrument_id.venue,
+            UnixNanos::default(),
+            None,
+        );
+
+        mass_status.add_order_reports(vec![report]);
+        *state.mass_status.lock() = Some(mass_status);
+        *state.connect_instrument.lock() = Some(instrument.clone());
+
+        node.start().await.unwrap();
+
+        {
+            let cache = node.kernel().cache();
+            let cache = cache.borrow();
+            assert_eq!(cache.instrument(&instrument_id), Some(&instrument));
+            assert_eq!(
+                cache.order(&client_order_id).map(|order| order.status()),
+                Some(OrderStatus::Accepted)
+            );
+            assert_eq!(
+                *state.registered_external_orders.lock(),
+                vec![client_order_id]
+            );
+        }
+
+        node.stop().await.unwrap();
+        node.dispose();
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_start_stop_request_during_exec_connect_flush_skips_reconciliation() {
+        let config = LiveNodeConfig {
+            exec_engine: LiveExecutionEngineConfig {
+                reconciliation: true,
+                ..Default::default()
+            },
+            delay_post_stop: Duration::ZERO,
+            timeout_disconnection: Duration::from_millis(50),
+            ..Default::default()
+        };
+
+        let (mut node, state) = live_node_with_startup_mass_status_client(
+            "ExecConnectFlushStop",
+            config,
+            StartupMassStatusBehavior::Unavailable,
+        );
+        let handle = node.handle();
+        let instrument = InstrumentAny::CryptoPerpetual(crypto_perpetual_ethusdt());
+        let topic = switchboard::get_instrument_topic(instrument.id());
+
+        let handler = msgbus::TypedHandler::from({
+            let handle = handle.clone();
+            move |_: &InstrumentAny| handle.stop()
+        });
+
+        msgbus::subscribe_instruments(topic.into(), handler, None);
+        *state.connect_instrument.lock() = Some(instrument);
+
+        node.start().await.unwrap();
+
+        assert!(!state.mass_status_requested.load(Ordering::Relaxed));
+        assert_eq!(handle.state(), NodeState::Stopped);
+        assert!(!state.connected.load(Ordering::Relaxed));
+
+        node.dispose();
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_start_leaves_data_sent_during_exec_connect_flush_queued() {
+        let config = LiveNodeConfig {
+            exec_engine: LiveExecutionEngineConfig {
+                reconciliation: true,
+                ..Default::default()
+            },
+            delay_post_stop: Duration::ZERO,
+            timeout_disconnection: Duration::from_millis(50),
+            ..Default::default()
+        };
+
+        let (mut node, state) = live_node_with_startup_mass_status_client(
+            "ExecConnectFlushBound",
+            config,
+            StartupMassStatusBehavior::Unavailable,
+        );
+        let instrument = InstrumentAny::CryptoPerpetual(crypto_perpetual_ethusdt());
+        let instrument_id = instrument.id();
+        let follow_up = InstrumentAny::CurrencyPair(currency_pair_btcusdt());
+        let follow_up_id = follow_up.id();
+        let topic = switchboard::get_instrument_topic(instrument_id);
+
+        let handler = msgbus::TypedHandler::from({
+            let follow_up = follow_up.clone();
+            move |_: &InstrumentAny| {
+                let event = DataEvent::Data(follow_up.clone().into());
+                get_data_event_sender().send(event).unwrap();
+            }
+        });
+
+        msgbus::subscribe_instruments(topic.into(), handler, None);
+        *state.connect_instrument.lock() = Some(instrument.clone());
+
+        node.start().await.unwrap();
+
+        {
+            let cache = node.kernel().cache();
+            let cache = cache.borrow();
+            assert_eq!(cache.instrument(&instrument_id), Some(&instrument));
+            assert_eq!(cache.instrument(&follow_up_id), None);
+        }
+
+        node.stop().await.unwrap();
+
+        assert_eq!(
+            node.kernel().cache().borrow().instrument(&follow_up_id),
+            Some(&follow_up)
+        );
+
+        node.dispose();
+    }
+
+    #[rstest]
+    #[tokio::test]
     async fn test_startup_mass_status_registers_external_order_with_source_client() {
         let config = LiveNodeConfig {
             exec_engine: LiveExecutionEngineConfig {
@@ -3344,6 +3501,7 @@ pub(crate) mod serial_tests {
             UnixNanos::default(),
             None,
         );
+
         mass_status.add_order_reports(vec![report]);
         *source_state.mass_status.lock() = Some(mass_status);
 
@@ -3431,6 +3589,7 @@ pub(crate) mod serial_tests {
             UnixNanos::default(),
             None,
         );
+
         mass_status.add_order_reports(vec![test_order_report(
             AccountId::from(reported_account_id),
             client_order_id,
@@ -3500,6 +3659,7 @@ pub(crate) mod serial_tests {
             UnixNanos::default(),
             None,
         );
+
         mass_status.add_order_reports(vec![test_order_report(
             source_account_id,
             client_order_id,
@@ -3526,6 +3686,7 @@ pub(crate) mod serial_tests {
             .expect("untrusted cached order origin should warn, not abort startup");
 
         assert!(state.registered_external_orders.lock().is_empty());
+
         {
             let cache = node.kernel().cache();
             let cache = cache.borrow();
@@ -3560,6 +3721,7 @@ pub(crate) mod serial_tests {
             UnixNanos::default(),
             None,
         );
+
         mass_status.add_order_reports(vec![test_order_report(
             source_account_id,
             client_order_id,
@@ -3577,7 +3739,6 @@ pub(crate) mod serial_tests {
         add_accepted_test_order(&node, client_order_id, venue_order_id, source_client_id);
 
         let exec_engine = node.kernel().exec_engine().clone();
-
         let handler = ShareableMessageHandler::from_typed(move |_report: &OrderStatusReport| {
             exec_engine
                 .borrow_mut()
@@ -3938,6 +4099,7 @@ pub(crate) mod serial_tests {
 
         let driver = async {
             wait_until_async(|| async { handle.is_running() }, Duration::from_secs(2)).await;
+
             {
                 let mut cache = cache.borrow_mut();
                 cache.add_instrument(instrument).unwrap();
@@ -5935,7 +6097,6 @@ pub(crate) mod serial_tests {
         };
 
         let mut config = reconciliation_node_config(1);
-
         if timeout_retry {
             config.timeout_reconciliation = Duration::from_millis(100);
         }
@@ -6087,6 +6248,7 @@ pub(crate) mod serial_tests {
             UnixNanos::default(),
             None,
         );
+
         mass_status.add_order_reports(vec![report]);
         mass_status.add_fill_reports(vec![fill]);
         *state.mass_status.lock() = Some(mass_status);
@@ -6318,7 +6480,6 @@ pub(crate) mod serial_tests {
         let mut order_reports = Vec::with_capacity(ORDER_COUNT);
         let mut fill_reports = Vec::with_capacity(ORDER_COUNT);
         let mut order_ids = Vec::with_capacity(ORDER_COUNT);
-
         for index in 0..ORDER_COUNT {
             let client_order_id = ClientOrderId::from(format!("O-STRESS-{index:02}").as_str());
             let venue_order_id = VenueOrderId::from(format!("V-STRESS-{index:02}").as_str());
@@ -6394,7 +6555,6 @@ pub(crate) mod serial_tests {
             .await;
             let sender = get_exec_event_sender();
             let mut sample = SEED;
-
             for index in 0..EXEC_BACKLOG {
                 sample ^= sample << 13;
                 sample ^= sample >> 7;

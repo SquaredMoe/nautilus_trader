@@ -51,6 +51,7 @@ impl PolymarketDataClient {
 
         let watchlist = self.resolve_poll_watchlist.clone();
         let instruments = self.instruments.clone();
+        let cache = self.cache.clone();
         let owner_lock = self.resolve_watch_apply_mutex.clone();
         let closed_condition_ids = self.subscriptions.closed_condition_ids.clone();
 
@@ -60,6 +61,7 @@ impl PolymarketDataClient {
                 &closed_condition_ids,
                 &watchlist,
                 &instruments,
+                cache.as_ref(),
                 event,
             );
         });
@@ -277,7 +279,7 @@ impl PolymarketDataClient {
 
                         tokio::select! {
                             () = pause_and_reconcile_resolve_watch_entries(
-                                &resolve_ctx, &selection.pause_condition_ids,
+                                &resolve_ctx, &selection.pause_condition_ids, max_wait_secs,
                             ) => {}
                             () = cancellation.cancelled() => break,
                         }
@@ -1003,7 +1005,11 @@ mod tests {
         client
             .subscriptions
             .book_sync
-            .request_recovery(instrument_id, Instant::now());
+            .request_recovery_if_subscribed(
+                &client.subscriptions.active_delta_subs,
+                instrument_id,
+                Instant::now(),
+            );
         client
             .subscriptions
             .pending_auto_loads
@@ -1054,7 +1060,11 @@ mod tests {
         client
             .subscriptions
             .book_sync
-            .request_recovery(instrument_id, Instant::now());
+            .request_recovery_if_subscribed(
+                &client.subscriptions.active_delta_subs,
+                instrument_id,
+                Instant::now(),
+            );
         client
             .subscriptions
             .pending_auto_loads
@@ -1939,9 +1949,10 @@ mod tests {
         // The live boundary refuses re-application, so no production path recreates this
         let republished = apply_live_instrument(
             &client.subscriptions.closed_condition_ids,
-            &client.instrument_update_state,
+            &client.instrument_update_state.lock(),
             &client.instruments,
             &client.subscriptions.token_meta,
+            true,
             &inst,
             |_| {},
         );
