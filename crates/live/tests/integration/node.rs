@@ -52,7 +52,10 @@ use nautilus_common::{
         },
         system::{QueueStateChanged, ShutdownSystem},
     },
-    msgbus::{self, MessagingSwitchboard, ShareableMessageHandler, switchboard},
+    msgbus::{
+        self, BusMessage, MessageBusExternalIngress, MessagingSwitchboard, ShareableMessageHandler,
+        switchboard,
+    },
     nautilus_actor,
     runner::{TimeEventMessage, TimeEventSender, get_time_event_sender},
     testing::{wait_until, wait_until_async},
@@ -67,8 +70,11 @@ use nautilus_live::{
 };
 use nautilus_model::{
     accounts::AccountAny,
-    enums::{LiquiditySide, OmsType, OrderSide, OrderStatus, OrderType, PositionSide, TimeInForce},
-    events::OrderEventAny,
+    enums::{
+        AccountType, LiquiditySide, OmsType, OrderSide, OrderStatus, OrderType, PositionSide,
+        TimeInForce,
+    },
+    events::{OrderEventAny, account::state::AccountState},
     identifiers::{
         AccountId, ActorId, ClientId, ClientOrderId, ExecAlgorithmId, InstrumentId, PositionId,
         StrategyId, TradeId, TraderId, Venue, VenueOrderId,
@@ -355,6 +361,26 @@ pub(crate) mod serial_tests {
     mod reconciliation_bench;
 
     mod report_acceptance;
+    mod startup;
+
+    #[derive(Default)]
+    struct FailingIngress {
+        closed: bool,
+    }
+
+    impl MessageBusExternalIngress for FailingIngress {
+        fn is_closed(&self) -> bool {
+            self.closed
+        }
+
+        fn take_receiver(&mut self) -> anyhow::Result<tokio::sync::mpsc::Receiver<BusMessage>> {
+            anyhow::bail!("external ingress receiver unavailable")
+        }
+
+        fn close(&mut self) {
+            self.closed = true;
+        }
+    }
 
     #[derive(Clone, Debug, Default)]
     struct FailingDisconnectDataClientState {
@@ -371,6 +397,7 @@ pub(crate) mod serial_tests {
     #[derive(Clone, Copy, Debug)]
     enum LifecycleClientBehavior {
         Connects,
+        ConnectFails(&'static str),
         ConnectPending,
         ReadinessPending,
         ConnectDelayedReadinessPending,
@@ -385,6 +412,7 @@ pub(crate) mod serial_tests {
     struct LifecycleDataClient {
         state: LifecycleClientState,
         behavior: LifecycleClientBehavior,
+        stop_on_connect: Option<LiveNodeHandle>,
     }
 
     struct LifecycleExecutionClient {
@@ -495,6 +523,7 @@ pub(crate) mod serial_tests {
             Ok(Box::new(LifecycleDataClient {
                 state: self.state.clone(),
                 behavior: self.behavior,
+                stop_on_connect: None,
             }))
         }
 
@@ -611,6 +640,7 @@ pub(crate) mod serial_tests {
             self.state.connect_attempted.store(true, Ordering::Relaxed);
 
             match self.behavior {
+                LifecycleClientBehavior::ConnectFails(error) => anyhow::bail!("{error}"),
                 LifecycleClientBehavior::ConnectPending => {
                     std::future::pending::<anyhow::Result<()>>().await
                 }
@@ -623,6 +653,11 @@ pub(crate) mod serial_tests {
                 | LifecycleClientBehavior::DisconnectPending
                 | LifecycleClientBehavior::DisconnectKeepsConnected => {
                     self.state.connected.store(true, Ordering::Relaxed);
+
+                    if let Some(handle) = &self.stop_on_connect {
+                        handle.stop();
+                    }
+
                     Ok(())
                 }
             }
@@ -743,6 +778,7 @@ pub(crate) mod serial_tests {
             self.state.connect_attempted.store(true, Ordering::Relaxed);
 
             match self.behavior {
+                LifecycleClientBehavior::ConnectFails(error) => anyhow::bail!("{error}"),
                 LifecycleClientBehavior::ConnectPending => {
                     std::future::pending::<anyhow::Result<()>>().await
                 }
@@ -3304,6 +3340,57 @@ pub(crate) mod serial_tests {
         );
         assert_eq!(state.instrument_updates.load(Ordering::Relaxed), 1);
         assert!(state.mass_status_requested.load(Ordering::Relaxed));
+        node.stop().await.unwrap();
+        node.dispose();
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_start_registers_account_while_execution_client_connects() {
+        let config = LiveNodeConfig {
+            exec_engine: LiveExecutionEngineConfig {
+                reconciliation: true,
+                ..Default::default()
+            },
+            timeout_connection: Duration::from_millis(250),
+            delay_post_stop: Duration::ZERO,
+            ..Default::default()
+        };
+
+        let (mut node, state) = live_node_with_startup_mass_status_client(
+            "ExecConnectAccountStartup",
+            config,
+            StartupMassStatusBehavior::Unavailable,
+        );
+        let account_id = AccountId::from("STARTUP-MASS-STATUS-001");
+
+        let account = AccountState::new(
+            account_id,
+            AccountType::Margin,
+            Vec::new(),
+            Vec::new(),
+            true,
+            UUID4::new(),
+            UnixNanos::default(),
+            UnixNanos::default(),
+            Some(Currency::USDT()),
+        );
+
+        *state.connect_account.lock() = Some(account.clone());
+
+        node.start().await.unwrap();
+
+        assert_eq!(node.state(), NodeState::Running);
+        assert_eq!(
+            node.kernel()
+                .cache()
+                .borrow()
+                .account(&account_id)
+                .and_then(|account| account.last_event()),
+            Some(account),
+        );
+        assert!(state.mass_status_requested.load(Ordering::Relaxed));
+
         node.stop().await.unwrap();
         node.dispose();
     }
@@ -6319,8 +6406,8 @@ pub(crate) mod serial_tests {
 
         #[rstest]
         fn prop_terminal_fill_histories_match_unique_trade_ledger(
-            canonical in proptest::collection::vec((90u16..=110, 1u8..=5), 1..=3),
-            delivery in proptest::collection::vec(0u8..=11, 1..=10),
+            canonical in proptest::collection::vec((90_u16..=110, 1_u8..=5), 1..=3),
+            delivery in proptest::collection::vec(0_u8..=11, 1..=10),
             expired in any::<bool>(),
         ) {
             let client_order_id = ClientOrderId::from("O-PROP-TERMINAL");

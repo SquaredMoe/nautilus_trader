@@ -163,6 +163,9 @@ pub struct Position {
     /// Entry notional consumed by inverse closes in the current episode.
     #[serde(default, skip_serializing_if = "Decimal::is_zero")]
     pub inverse_entry_notional_closed: Decimal,
+    /// The first fill whose retained settlement commission contributes to a cycle with no fills.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fee_only_fill_id: Option<UUID4>,
 }
 
 #[expect(clippy::large_enum_variant)]
@@ -258,6 +261,7 @@ impl Position {
             allows_negative_price: Some(instrument.allows_negative_price()),
             inverse_gross_pnl_closed: Decimal::ZERO,
             inverse_entry_notional_closed: Decimal::ZERO,
+            fee_only_fill_id: None,
         };
 
         item.check_accounting()?;
@@ -319,12 +323,19 @@ impl Position {
             allows_negative_price: self.allows_negative_price,
             inverse_gross_pnl_closed: self.inverse_gross_pnl_closed,
             inverse_entry_notional_closed: self.inverse_entry_notional_closed,
+            fee_only_fill_id: self.fee_only_fill_id,
         }
     }
 
     /// Returns a snapshot copy without durable replay or fill-void history.
     #[must_use]
     pub fn clone_for_snapshot(&self) -> Self {
+        let mut snapshot = self.clone_cycle();
+        snapshot.fee_only_fill_id = self.fee_only_fill_id();
+        snapshot
+    }
+
+    fn clone_cycle(&self) -> Self {
         let mut snapshot = self.clone_without_events();
         snapshot.events.clone_from(&self.events);
         snapshot.adjustments.clone_from(&self.adjustments);
@@ -655,6 +666,7 @@ impl Position {
         next.replay_events = std::mem::take(&mut self.replay_events);
         next.fill_voids = std::mem::take(&mut self.fill_voids);
         next.events.push(fill.clone());
+        next.fee_only_fill_id = None;
         next.trade_ids.insert(fill.trade_id);
         if record_replay {
             next.replay_events
@@ -718,6 +730,7 @@ impl Position {
 
     fn reset_cycle(&mut self, fill: &OrderFilled) -> CorrectnessResult<()> {
         self.events.clear();
+        self.fee_only_fill_id = None;
         self.trade_ids.clear();
         self.adjustments.clear();
         self.buy_qty = Quantity::zero(self.size_precision);
@@ -1669,9 +1682,97 @@ impl Position {
             commission_voided,
         });
 
-        let closed = next.rebuild_from_replay()?;
+        let closed = next.rebuild_from_replay(|_| {})?;
         *self = next;
         Ok(closed)
+    }
+
+    /// Returns copies of cycles closed before the current one, in replay order.
+    /// The copies keep this position's ID.
+    ///
+    /// Applies the same fill voids as the current position, using only its retained replay history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the retained replay history cannot be applied.
+    pub fn replay_closed_cycles(&self) -> CorrectnessResult<Vec<Self>> {
+        let prior_accounts: AHashMap<_, _> = self
+            .replay_events
+            .iter()
+            .filter_map(|event| match event {
+                PositionReplayEvent::Filled(fill) if fill.account_id != self.account_id => {
+                    Some((fill.event_id, fill.account_id))
+                }
+                _ => None,
+            })
+            .collect();
+
+        let mut cycles = Vec::new();
+        self.clone().rebuild_from_replay(|position| {
+            let mut snapshot = position.clone_cycle();
+
+            let account_id = position
+                .events
+                .first()
+                .map(|fill| fill.account_id)
+                .or_else(|| {
+                    position
+                        .fee_only_fill_id
+                        .and_then(|id| prior_accounts.get(&id).copied())
+                })
+                .or_else(|| position.adjustment_pnl_account_id());
+
+            if let Some(account_id) = account_id {
+                snapshot.account_id = account_id;
+            }
+
+            cycles.push(snapshot);
+        })?;
+
+        Ok(cycles)
+    }
+
+    /// Returns the first PnL adjustment's account for a cycle with only adjustment PnL.
+    #[must_use]
+    pub fn adjustment_pnl_account_id(&self) -> Option<AccountId> {
+        if !self.events.is_empty() || self.commissions.contains_key(&self.settlement_currency) {
+            return None;
+        }
+
+        self.adjustments
+            .iter()
+            .find(|adjustment| adjustment.pnl_change.is_some())
+            .map(|adjustment| adjustment.account_id)
+    }
+
+    /// Returns the fill ID for a fill-free close with retained settlement commission, when known.
+    ///
+    /// Recovers the ID from retained replay for positions written before the ID was stored.
+    #[must_use]
+    pub fn fee_only_fill_id(&self) -> Option<UUID4> {
+        if self.fee_only_fill_id.is_some() {
+            return self.fee_only_fill_id;
+        }
+
+        if !self.events.is_empty()
+            || !self.is_closed()
+            || self.fill_voids.is_empty()
+            || !self.commissions.contains_key(&self.settlement_currency)
+        {
+            return None;
+        }
+
+        let mut replayed = self.clone();
+        if replayed.rebuild_from_replay(|_| {}).is_ok()
+            && replayed.is_closed()
+            && replayed.ts_last == self.ts_last
+            && replayed.realized_pnl == self.realized_pnl
+            && replayed.commissions == self.commissions
+        {
+            replayed.fee_only_fill_id
+        } else {
+            None
+        }
     }
 
     /// Returns durable fill fragments matching an order trade in local application order.
@@ -1699,7 +1800,10 @@ impl Position {
     // The banked total assumes `replay_events` spans every cycle this position archived, since
     // settling replaces all of its frames with one worth that total. Bounding the log has to
     // preserve it at trim time; `Cache::settle_position_snapshots` documents the two ways.
-    fn rebuild_from_replay(&mut self) -> CorrectnessResult<Option<Money>> {
+    fn rebuild_from_replay(
+        &mut self,
+        mut archive_close: impl FnMut(&Self),
+    ) -> CorrectnessResult<Option<Money>> {
         let replay_events = self.replay_events.clone();
         let restatement_indexes = Self::price_restatement_indexes(&replay_events);
         let mut quantity_removed = AHashMap::<usize, Quantity>::new();
@@ -1746,6 +1850,7 @@ impl Position {
                         effective_qty,
                         effective_commission,
                         &mut closed_cycles_pnl,
+                        &mut archive_close,
                     )?;
                 }
                 PositionReplayEvent::Adjusted(adjustment) => {
@@ -1767,12 +1872,13 @@ impl Position {
         effective_qty: Quantity,
         effective_commission: Option<Money>,
         closed_cycles_pnl: &mut Option<Money>,
+        archive_close: &mut impl FnMut(&Self),
     ) -> CorrectnessResult<()> {
         if effective_qty.is_zero() {
             if let Some(commission) =
                 effective_commission.filter(|commission| !commission.is_zero())
                 && let Some(realized_pnl) =
-                    self.apply_surviving_fill_commission(fill, commission)?
+                    self.apply_surviving_fill_commission(fill, commission, archive_close)?
             {
                 *closed_cycles_pnl = Some(Self::bank_closed_cycle_pnl(
                     *closed_cycles_pnl,
@@ -1788,6 +1894,7 @@ impl Position {
         if self.side == PositionSide::Flat
             && let Some(realized_pnl) = self.realized_pnl
         {
+            archive_close(self);
             *closed_cycles_pnl = Some(Self::bank_closed_cycle_pnl(
                 *closed_cycles_pnl,
                 realized_pnl,
@@ -1875,14 +1982,18 @@ impl Position {
         &mut self,
         fill: &OrderFilled,
         commission: Money,
+        archive_close: &mut impl FnMut(&Self),
     ) -> CorrectnessResult<Option<Money>> {
         let is_base_commission =
             self.is_currency_pair && self.base_currency == Some(commission.currency);
         let reopens =
             self.side == PositionSide::Flat && is_base_commission && !amount(commission)?.is_zero();
         let closed_cycles_pnl_previous = reopens.then_some(self.realized_pnl).flatten();
-
         if reopens {
+            if closed_cycles_pnl_previous.is_some() {
+                archive_close(self);
+            }
+
             self.reset_cycle(fill)?;
         }
 
@@ -1894,6 +2005,11 @@ impl Position {
             .ok_or_else(|| invalid("position commission overflow"))?;
         self.commissions.insert(commission.currency, total);
         if commission.currency == self.settlement_currency {
+            if self.events.is_empty() && self.realized_pnl.is_none() {
+                self.opening_order_id = fill.client_order_id;
+                self.fee_only_fill_id = Some(fill.event_id);
+            }
+
             self.accumulate_pnl(-amount(commission)?)?;
         }
 
@@ -1982,6 +2098,7 @@ impl Position {
     fn clear_derived_state(&mut self) {
         // Empty purge retains legacy peak quantity, opening average, and closing order metadata
         self.events.clear();
+        self.fee_only_fill_id = None;
         self.trade_ids.clear();
         self.adjustments.clear();
         self.buy_qty = Quantity::zero(self.size_precision);
@@ -6583,6 +6700,7 @@ mod tests {
             .currency(fill.currency)
             .liquidity_side(fill.liquidity_side)
             .build();
+        let fill_id = fill.event_id;
         let mut position = Position::new(&instrument, fill);
 
         position
@@ -6594,6 +6712,22 @@ mod tests {
         assert_eq!(position.commissions(), vec![Money::from("1.00 USD")]);
         assert_eq!(position.realized_pnl, Some(Money::from("-1.00 USD")));
         assert!(position.events.is_empty());
+        assert_eq!(position.fee_only_fill_id, Some(fill_id));
+
+        let snapshot = position.clone_for_snapshot();
+        let mut encoded = serde_json::to_value(snapshot).unwrap();
+        let restored: Position = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(restored.fee_only_fill_id, Some(fill_id));
+        encoded.as_object_mut().unwrap().remove("fee_only_fill_id");
+        let legacy: Position = serde_json::from_value(encoded).unwrap();
+        assert_eq!(legacy.fee_only_fill_id, None);
+        assert_eq!(legacy.fee_only_fill_id(), None);
+
+        let mut encoded = serde_json::to_value(position).unwrap();
+        encoded.as_object_mut().unwrap().remove("fee_only_fill_id");
+        let legacy: Position = serde_json::from_value(encoded).unwrap();
+        assert_eq!(legacy.fee_only_fill_id(), Some(fill_id));
+        assert_eq!(legacy.clone_for_snapshot().fee_only_fill_id, Some(fill_id));
     }
 
     #[rstest]
@@ -10884,11 +11018,11 @@ mod tests {
             None,
             None,
             None,
-            Some(UnixNanos::from(2_000u64)),
+            Some(UnixNanos::from(2_000_u64)),
             None,
         );
         let mut position = Position::new(&audusd_sim, fill1.into());
-        assert_eq!(position.ts_opened, UnixNanos::from(2_000u64));
+        assert_eq!(position.ts_opened, UnixNanos::from(2_000_u64));
 
         // Second fill at ts=1000 (earlier than position open)
         let fill2 = TestOrderEventStubs::filled(
@@ -10900,13 +11034,13 @@ mod tests {
             None,
             None,
             None,
-            Some(UnixNanos::from(1_000u64)),
+            Some(UnixNanos::from(1_000_u64)),
             None,
         );
 
         // Should not panic; ts_opened and opening_order_id stay unchanged
         position.apply(&fill2.into());
-        assert_eq!(position.ts_opened, UnixNanos::from(2_000u64));
+        assert_eq!(position.ts_opened, UnixNanos::from(2_000_u64));
         assert_eq!(position.opening_order_id, order1.client_order_id());
         assert_eq!(position.events.len(), 2);
     }
@@ -10933,7 +11067,7 @@ mod tests {
             None,
             None,
             None,
-            Some(UnixNanos::from(2_000u64)),
+            Some(UnixNanos::from(2_000_u64)),
             None,
         );
         let closing_fill = TestOrderEventStubs::filled(
@@ -10945,7 +11079,7 @@ mod tests {
             None,
             None,
             None,
-            Some(UnixNanos::from(1_000u64)),
+            Some(UnixNanos::from(1_000_u64)),
             None,
         );
         let mut position = Position::new(&audusd_sim, opening_fill.into());
@@ -10953,8 +11087,8 @@ mod tests {
         position.apply(&closing_fill.into());
 
         assert_eq!(position.side, PositionSide::Flat);
-        assert_eq!(position.ts_opened, UnixNanos::from(2_000u64));
-        assert_eq!(position.ts_closed, Some(UnixNanos::from(1_000u64)));
+        assert_eq!(position.ts_opened, UnixNanos::from(2_000_u64));
+        assert_eq!(position.ts_closed, Some(UnixNanos::from(1_000_u64)));
         assert_eq!(position.duration_ns, DurationNanos::default());
         assert_eq!(
             position.closing_order_id,
@@ -11052,7 +11186,7 @@ mod tests {
 
     #[rstest]
     fn test_fold_net_position_single_long() {
-        let legs = [(dec!(100), dec!(1.5), 1u64)];
+        let legs = [(dec!(100), dec!(1.5), 1_u64)];
         let (net_qty, net_px) = fold_net_position(&legs);
         assert_eq!(net_qty, dec!(100));
         assert_eq!(net_px, dec!(1.5));
@@ -11060,7 +11194,7 @@ mod tests {
 
     #[rstest]
     fn test_fold_net_position_single_short() {
-        let legs = [(dec!(-100), dec!(1.5), 1u64)];
+        let legs = [(dec!(-100), dec!(1.5), 1_u64)];
         let (net_qty, net_px) = fold_net_position(&legs);
         assert_eq!(net_qty, dec!(-100));
         assert_eq!(net_px, dec!(1.5));
@@ -11069,7 +11203,7 @@ mod tests {
     #[rstest]
     fn test_fold_net_position_same_side_weighted_average() {
         // Long 100 @ 1.00, long 200 @ 0.50 -> net 300 @ 0.6667 (rounded weighted avg).
-        let legs = [(dec!(100), dec!(1.0), 1u64), (dec!(200), dec!(0.5), 2u64)];
+        let legs = [(dec!(100), dec!(1.0), 1_u64), (dec!(200), dec!(0.5), 2_u64)];
         let (net_qty, net_px) = fold_net_position(&legs);
         assert_eq!(net_qty, dec!(300));
         // (100 * 1.0 + 200 * 0.5) / 300 = 200/300 = 0.6666...
@@ -11080,8 +11214,8 @@ mod tests {
     fn test_fold_net_position_partial_close_preserves_avg() {
         // Long 300 @ 0.80, short 100 @ 1.00 -> net long 200 @ 0.80 (short closes part of long).
         let legs = [
-            (dec!(300), dec!(0.80), 1u64),
-            (dec!(-100), dec!(1.00), 2u64),
+            (dec!(300), dec!(0.80), 1_u64),
+            (dec!(-100), dec!(1.00), 2_u64),
         ];
         let (net_qty, net_px) = fold_net_position(&legs);
         assert_eq!(net_qty, dec!(200));
@@ -11090,7 +11224,11 @@ mod tests {
 
     #[rstest]
     fn test_fold_net_position_full_close() {
-        let legs = [(dec!(100), dec!(1.0), 1u64), (dec!(-100), dec!(2.0), 2u64)];
+        let legs = [
+            (dec!(100), dec!(1.0), 1_u64),
+            (dec!(-100), dec!(2.0), 2_u64),
+        ];
+
         let (net_qty, net_px) = fold_net_position(&legs);
         assert_eq!(net_qty, Decimal::ZERO);
         assert_eq!(net_px, Decimal::ZERO);
@@ -11100,9 +11238,9 @@ mod tests {
     fn test_fold_net_position_single_flip_uses_flipping_price() {
         // L100@1, S50@2 partial-closes to L50@1, S100@3 flips to S50 @ 3
         let legs = [
-            (dec!(100), dec!(1.00), 1u64),
-            (dec!(-50), dec!(2.00), 2u64),
-            (dec!(-100), dec!(3.00), 3u64),
+            (dec!(100), dec!(1.00), 1_u64),
+            (dec!(-50), dec!(2.00), 2_u64),
+            (dec!(-100), dec!(3.00), 3_u64),
         ];
         let (net_qty, net_px) = fold_net_position(&legs);
         assert_eq!(net_qty, dec!(-50));
@@ -11113,9 +11251,9 @@ mod tests {
     fn test_fold_net_position_double_flip() {
         // L50, S100 flips to S50@2, B100 flips to L50@3
         let legs = [
-            (dec!(50), dec!(1.00), 1u64),
-            (dec!(-100), dec!(2.00), 2u64),
-            (dec!(100), dec!(3.00), 3u64),
+            (dec!(50), dec!(1.00), 1_u64),
+            (dec!(-100), dec!(2.00), 2_u64),
+            (dec!(100), dec!(3.00), 3_u64),
         ];
         let (net_qty, net_px) = fold_net_position(&legs);
         assert_eq!(net_qty, dec!(50));
@@ -11126,9 +11264,9 @@ mod tests {
     fn test_fold_net_position_zero_quantity_legs_skipped() {
         // Zero-qty legs are filtered out (closed positions have signed_qty == 0)
         let legs = [
-            (dec!(100), dec!(1.0), 1u64),
-            (Decimal::ZERO, dec!(99.0), 2u64),
-            (dec!(50), dec!(2.0), 3u64),
+            (dec!(100), dec!(1.0), 1_u64),
+            (Decimal::ZERO, dec!(99.0), 2_u64),
+            (dec!(50), dec!(2.0), 3_u64),
         ];
         let (net_qty, net_px) = fold_net_position(&legs);
         assert_eq!(net_qty, dec!(150));
@@ -11139,8 +11277,8 @@ mod tests {
     #[rstest]
     fn test_fold_net_position_stable_sort_preserves_input_order_for_equal_ts() {
         // Caller owns tie-breaking; this pins the input-order contract for equal-ts legs
-        let leg_a = (dec!(100), dec!(1.00), 1u64);
-        let leg_b = (dec!(-100), dec!(2.00), 1u64);
+        let leg_a = (dec!(100), dec!(1.00), 1_u64);
+        let leg_b = (dec!(-100), dec!(2.00), 1_u64);
 
         let ab = [leg_a, leg_b];
         let ba = [leg_b, leg_a];
@@ -11151,8 +11289,8 @@ mod tests {
         assert_eq!(fold_net_position(&ba), (Decimal::ZERO, Decimal::ZERO));
 
         // Same-ts legs that do NOT fully cancel: input order picks the surviving avg
-        let leg_c = (dec!(150), dec!(1.00), 1u64);
-        let leg_d = (dec!(-100), dec!(2.00), 1u64);
+        let leg_c = (dec!(150), dec!(1.00), 1_u64);
+        let leg_d = (dec!(-100), dec!(2.00), 1_u64);
         let cd = [leg_c, leg_d];
         let dc = [leg_d, leg_c];
         // c-then-d: L150@1, S100@2 -> long 50 @ 1
@@ -11165,9 +11303,9 @@ mod tests {
     fn test_fold_net_position_close_then_reopen() {
         // A leg after a full close opens fresh (new net, new avg)
         let legs = [
-            (dec!(100), dec!(1.00), 1u64),
-            (dec!(-100), dec!(1.50), 2u64),
-            (dec!(50), dec!(3.00), 3u64),
+            (dec!(100), dec!(1.00), 1_u64),
+            (dec!(-100), dec!(1.50), 2_u64),
+            (dec!(50), dec!(3.00), 3_u64),
         ];
         let (net_qty, net_px) = fold_net_position(&legs);
         assert_eq!(net_qty, dec!(50));
@@ -11178,14 +11316,14 @@ mod tests {
     fn test_fold_net_position_orders_by_ts_opened() {
         // Sorted vs shuffled input must fold to the same result.
         let in_order = [
-            (dec!(100), dec!(1.00), 1u64),
-            (dec!(-50), dec!(2.00), 2u64),
-            (dec!(-100), dec!(3.00), 3u64),
+            (dec!(100), dec!(1.00), 1_u64),
+            (dec!(-50), dec!(2.00), 2_u64),
+            (dec!(-100), dec!(3.00), 3_u64),
         ];
         let shuffled = [
-            (dec!(-100), dec!(3.00), 3u64),
-            (dec!(100), dec!(1.00), 1u64),
-            (dec!(-50), dec!(2.00), 2u64),
+            (dec!(-100), dec!(3.00), 3_u64),
+            (dec!(100), dec!(1.00), 1_u64),
+            (dec!(-50), dec!(2.00), 2_u64),
         ];
         assert_eq!(fold_net_position(&in_order), fold_net_position(&shuffled));
     }
@@ -11256,9 +11394,9 @@ mod tests {
             fills in proptest::collection::vec(
                 (
                     prop_oneof![Just(OrderSide::Buy), Just(OrderSide::Sell)],
-                    1u32..1_000u32,
-                    1u32..100u32,
-                    0u64..1_000_000u64,
+                    1_u32..1_000_u32,
+                    1_u32..100_u32,
+                    0_u64..1_000_000_u64,
                 ),
                 1..6,
             )

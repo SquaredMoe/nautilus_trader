@@ -315,13 +315,16 @@ pub(crate) async fn request_targeted_order_reports(
     query_delay: Duration,
 ) -> Vec<TargetedOrderReportResult> {
     let mut results = Vec::with_capacity(queries.len());
-    let mut request_count = 0usize;
+    let mut request_count = 0_usize;
 
     for mut query in queries {
-        let mut report = None;
-        let mut fills = Vec::new();
-        let mut report_client_id = None;
-        let mut coverage_complete = true;
+        let mut result = TargetedOrderReportResult {
+            client_order_id: query.client_order_id(),
+            client_id: None,
+            report: None,
+            fills: Vec::new(),
+            coverage_complete: true,
+        };
 
         for client_id in &query.responsible_clients {
             let client_id = *client_id;
@@ -329,7 +332,7 @@ pub(crate) async fn request_targeted_order_reports(
                 .iter()
                 .find(|client| client.client_id() == client_id)
             else {
-                coverage_complete = false;
+                result.coverage_complete = false;
                 log::warn!(
                     "Cannot run targeted order status query for {}: execution client {client_id} is unavailable",
                     query.client_order_id,
@@ -349,42 +352,33 @@ pub(crate) async fn request_targeted_order_reports(
                 client.generate_order_status_report(&query.command).await
             };
 
-            if let Some(candidate) =
-                targeted_report_response(&query, client_id, response, &mut coverage_complete)
-            {
-                if order_report_has_missing_fills(
-                    &candidate,
-                    query.filled_qty,
-                    client.requires_authoritative_fills(),
-                ) {
-                    let command = targeted_fill_command(&query, &candidate);
-                    match client.generate_fill_reports(command).await {
-                        Ok(reports) => {
-                            fills = reports
-                                .into_iter()
-                                .filter(|fill| targeted_fill_matches(&candidate, fill))
-                                .collect();
-                        }
-                        Err(e) => log::warn!(
-                            "Failed fill report query from {client_id} for {}: {e}",
-                            query.client_order_id,
-                        ),
-                    }
-                }
+            let Some(report) = targeted_report_response(
+                &query,
+                client_id,
+                response,
+                &mut result.coverage_complete,
+            ) else {
+                continue;
+            };
 
-                report = Some(candidate);
-                report_client_id = Some(client_id);
-                break;
+            if order_report_has_missing_fills(
+                &report,
+                query.filled_qty,
+                client.requires_authoritative_fills(),
+            ) {
+                let command = targeted_fill_command(&query, &report);
+                let response = client.generate_fill_reports(command).await;
+                result.fills =
+                    targeted_fill_response(query.client_order_id, client_id, &report, response)
+                        .unwrap_or_default();
             }
+
+            result.report = Some(report);
+            result.client_id = Some(client_id);
+            break;
         }
 
-        results.push(TargetedOrderReportResult {
-            client_order_id: query.client_order_id(),
-            client_id: report_client_id,
-            report,
-            fills,
-            coverage_complete,
-        });
+        results.push(result);
     }
 
     results
@@ -402,7 +396,7 @@ pub(crate) async fn collect_targeted_order_reports(
     results: Rc<RefCell<Vec<TargetedOrderReportResult>>>,
 ) -> bool {
     let mut collectors = IndexMap::new();
-    let mut request_count = 0usize;
+    let mut request_count = 0_usize;
 
     for mut query in queries {
         collectors.clear();
@@ -459,17 +453,10 @@ pub(crate) async fn collect_targeted_order_reports(
                 return false;
             };
 
-            match response {
-                Ok(fills) => {
-                    results.borrow_mut()[result_index].fills = fills
-                        .into_iter()
-                        .filter(|fill| targeted_fill_matches(&report, fill))
-                        .collect();
-                }
-                Err(e) => log::warn!(
-                    "Failed fill report query from {client_id} for {}: {e}",
-                    query.client_order_id
-                ),
+            if let Some(fills) =
+                targeted_fill_response(query.client_order_id, client_id, &report, response)
+            {
+                results.borrow_mut()[result_index].fills = fills;
             }
         }
     }
@@ -601,6 +588,26 @@ fn targeted_fill_command(
 
     command.log_receipt_level = LogLevel::Debug;
     command
+}
+
+fn targeted_fill_response(
+    client_order_id: ClientOrderId,
+    client_id: ClientId,
+    report: &OrderStatusReport,
+    response: anyhow::Result<Vec<FillReport>>,
+) -> Option<Vec<FillReport>> {
+    match response {
+        Ok(fills) => Some(
+            fills
+                .into_iter()
+                .filter(|fill| targeted_fill_matches(report, fill))
+                .collect(),
+        ),
+        Err(e) => {
+            log::warn!("Failed fill report query from {client_id} for {client_order_id}: {e}");
+            None
+        }
+    }
 }
 
 fn targeted_fill_matches(report: &OrderStatusReport, fill: &FillReport) -> bool {
@@ -2276,12 +2283,12 @@ pub(super) mod tests {
     proptest! {
         #[rstest]
         fn prop_position_quantities_match_tolerance_and_side_exposure(
-            long in 100i64..1_000_000,
-            short in 100i64..1_000_000,
-            long_delta in -10i64..=10,
-            short_delta in -10i64..=10,
-            tolerance in 0i64..=20,
-            scale in 0u32..=6,
+            long in 100_i64..1_000_000,
+            short in 100_i64..1_000_000,
+            long_delta in -10_i64..=10,
+            short_delta in -10_i64..=10,
+            tolerance in 0_i64..=20,
+            scale in 0_u32..=6,
             side_reports in any::<bool>(),
         ) {
             let venue_net = long + long_delta - short - short_delta;
@@ -2323,7 +2330,7 @@ pub(super) mod tests {
     proptest! {
         #[rstest]
         fn prop_position_qty_aggregates_preserves_sign_and_net(
-            values in proptest::collection::vec(-1_000_000i64..=1_000_000, 0..32),
+            values in proptest::collection::vec(-1_000_000_i64..=1_000_000, 0..32),
         ) {
             let quantities = values.iter().map(|v| Decimal::new(*v, 3)).collect::<Vec<_>>();
             let (net, long, short) = position_qty_aggregates(quantities.iter().copied());
