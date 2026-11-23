@@ -26,6 +26,7 @@ Released on TBD (UTC).
 - Added Hyperliquid product scope for execution clients (#5570), thanks @graceyangfan
 - Added Interactive Brokers contract order types to `instrument.info["orderTypes"]` (#5624), thanks @jweltmer
 - Added Kalshi numbered subaccount support (#5648), thanks for reporting @wangschien
+- Added Kraken `book_snapshot_timeout_secs` for Spot and Futures book recovery (#5300)
 - Added optional Lighter account transaction timestamps to WebSocket wire models
 - Added OKX low-level chase-trigger placement, amendment, and typed reads for `FUTURES` and `SWAP`
 - Added OKX `order_request_ttl_ms` option to set `expTime` on order requests (#5646), thanks @michalismeng
@@ -46,6 +47,7 @@ Released on TBD (UTC).
 - Renamed Python `ParquetDataCatalog` `*_quote_ticks` and `*_trade_ticks` methods to `*_quotes` and `*_trades`
 - Changed `Position` layout. Use `PositionReplayEvents` for `replay_events` via `.into()` (#5551), thanks @Milchstrassse
 - Changed `Position` literals to require `allows_negative_price`. Use `None` if unknown (#5535)
+- Changed `PortfolioSnapshot` literals to require `is_registration`. Use `true` only for account registration
 - Changed repeat option-chain subscribes from one actor to no-ops; unsubscribe before changing configuration
 - Changed `UnsubscribeOptionChain` literals; use `correlation_id: Some(owner_id)` (`None` requires a sole owner)
 - Changed option chains to require supported `greeks_convention` values when supplied
@@ -85,6 +87,8 @@ Released on TBD (UTC).
 - Changed `ParquetDataCatalog` typed queries such as `bars()` to return a builder; call `execute()`
 - Changed `ParquetDataCatalog::from_uri` to take `impl AsRef<Path>`; pass paths, not `&Cow<str>` values
 - Changed Databento and Interactive Brokers share-class stock IDs to use a space (`BRK B`) (#5606), thanks @mmatvien
+- Changed Databento generic loader bounds to `dbn::v3::HasRType` for DBN v1-v3 records
+- Changed Databento GLBX to skip outright futures and options with a missing multiplier. Supply `price_precision` for their market data
 - Changed `BinanceDataClientConfig` literals to require `use_usdm_raw_trades`. Use `false` for aggregate trades (#5643)
 - Changed `BinanceFuturesTradeMsg` literals to require `trade_type` (#5643)
 - Changed `BybitExecutionClientConfig` literals; add `load_ids: None`
@@ -100,6 +104,8 @@ Released on TBD (UTC).
 - Changed Kalshi `collect_snapshot`; pass `&AccountQuery { subaccount: 0, exchange_index }` for the primary account
 - Changed `FuturesEditOrderResponse` literals and reads. Add `error` and handle optional `edit_status` (#5614)
 - Changed `KrakenSpotHttpClient::modify_order` to return `Result<Option<VenueOrderId>>`. Handle `None` (#5661)
+- Changed `KrakenDataClientConfig` literals; add `book_snapshot_timeout_secs` or `..Default::default()` (#5300)
+- Changed Kraken Spot checksum recovery to retain the last book and keep validating checksums (#5300)
 - Changed Lighter `From<LighterTradeType>` for `LighterTradeQueryType` to `TryFrom`; handle the error
 - Changed Lighter position and asset frame literals; add `transaction_time: None` and update exhaustive matches
 - Changed Lighter venue enums with fallback and settlement variants; update exhaustive matches
@@ -131,7 +137,9 @@ Released on TBD (UTC).
 - Fixed `OptionChainSlice` ignoring Greeks in `ts_event` and using trigger timestamps for `ts_init`
 - Fixed option-chain delta selection depending on the arrival order of Greeks conventions
 - Fixed delta option chains missing matching strikes outside the ATM fallback
+- Fixed PostgreSQL cache startup hanging on current-thread Tokio or panicking on connection failure
 - Fixed PostgreSQL cache restoring another trader's OMS type when position IDs overlap
+- Fixed PostgreSQL `FuturesSpread` reloads panicking
 - Fixed PostgreSQL `OptionSpread` reloads panicking and dropping `tick_scheme`
 - Fixed PostgreSQL persistence of emulated order releases and recovery when both initializations are stored
 - Fixed local catalog paths with `#`, `%`, or `?` in queries, migration, and run manifests
@@ -175,6 +183,9 @@ Released on TBD (UTC).
 - Fixed own order books retaining stale orders after cache reload
 - Fixed historical book delta events splitting across response envelopes and time-range windows, thanks @faysou
 - Fixed portfolio balance aggregation to preserve exact totals and reject sums outside the `Money` range
+- Fixed Rust portfolio returns and Python tearsheets using the first retained intraday snapshot as account registration
+- Fixed legacy `AccountBalance` deserialization accepting amounts in currencies other than the declared one
+- Fixed daily return statistics losing tiny values or reporting dispersion for constant returns
 - Fixed trade PnL statistics counting closes that a fill void changed or removed
 - Fixed trade PnL statistics dropping NETTING cycles that share a close time
 - Fixed Architect AX funding subscriptions publishing the oldest rate in the lookback window
@@ -233,6 +244,7 @@ Released on TBD (UTC).
 - Fixed Polymarket reconciliation of wallet orders and positions outside discovery filters (#5649), thanks @imbolc
 - Fixed Polymarket stale metadata and resolution deadlines for tracked markets (#5671, #5655), thanks @imbolc
 - Fixed Polymarket book recovery stalling on older snapshots with matching book hashes (#5659), thanks @imbolc
+- Fixed Polymarket exhausting its fast recovery budget on books with no initial snapshot
 - Fixed Polymarket resolution fallbacks retrying every poll after a failure (#5660), thanks @imbolc
 
 ### Internal Improvements
@@ -287,6 +299,7 @@ Released on TBD (UTC).
 - Upgraded `arrow` and `parquet` crates to v59.3.3
 - Upgraded `bytes` crate to v1.12.2
 - Upgraded `clap` crate to v4.6.8
+- Upgraded `databento` crate to v0.65.0
 - Upgraded `datafusion` crate to v55.3.0
 - Upgraded `flate2` crate to v1.1.11
 - Upgraded `jiff` crate to v0.2.46

@@ -2529,6 +2529,12 @@ criteria = "safe-to-deploy"
 delta = "0.62.0 -> 0.63.0"
 notes = "Reviewed published live-reader delta and its existing DbnFsm batch API. Buffered records are drained before refill; read counts are bounded by supplied space, errors and heartbeat timeout remain explicit, and borrowed records retain the mutable client lifetime. Coordinated DBN and zstd upgrades add no network destination or credential behavior."
 
+[[audits.databento]]
+who = "Nautech Systems <info@nautechsystems.io>"
+criteria = "safe-to-deploy"
+delta = "0.63.0 -> 0.65.0"
+notes = "Reviewed the published batch, symbology, and live client changes. They reuse the existing HTTP transport and live gateway connection. The live client still returns immutable DBN record views. No new unsafe code, credentials, destinations, filesystem, or process behavior. DBN is covered separately."
+
 [[audits.datafusion]]
 who = "Nautech Systems <info@nautechsystems.io>"
 criteria = "safe-to-deploy"
@@ -3441,6 +3447,12 @@ criteria = "safe-to-deploy"
 delta = "0.70.0 -> 0.71.0"
 notes = "Published delta only changes the package version; no generated-code implementation change."
 
+[[audits.dbn-macros]]
+who = "Nautech Systems <info@nautechsystems.io>"
+criteria = "safe-to-deploy"
+delta = "0.71.0 -> 0.74.0"
+notes = "Reviewed source and code generation for v4 record header types, compile-time layout descriptions, field ordering, and Arrow attributes. Layout offsets come from the declared Rust structs. No new unsafe code, build script, network, filesystem, or process behavior."
+
 [[audits.defmt]]
 who = "Nautech Systems <info@nautechsystems.io>"
 criteria = "safe-to-deploy"
@@ -3628,6 +3640,12 @@ criteria = "safe-to-deploy"
 delta = "1.1.10 -> 1.1.11"
 importable = false
 notes = "Reviewed the published delta, including compressor and decoder buffering, reset, EOF, and FFI paths. Sync flushes drain across output-buffer boundaries; partial writes retain progress; incomplete write-side decoding reports UnexpectedEof. Miniz reset clears the dictionary. The zlib-rs uninitialized-output methods forward MaybeUninit slices to its safe API and retain initialized-byte accounting; C reset preserves validated window bits and checks its result. No new filesystem, network, process, or build-script capability."
+
+[[audits.form_urlencoded]]
+who = "Nautech Systems <info@nautechsystems.io>"
+criteria = "safe-to-deploy"
+delta = "1.2.2 -> 1.2.3"
+notes = "Reviewed the checksum-verified crates.io delta. Serializer::for_suffix clamps out-of-bounds offsets to the target length instead of panicking. Raises the percent-encoding minimum to 2.3.2, already resolved in both lockfiles. No new unsafe code or build script changes."
 
 [[audits.futures]]
 who = "Nautech Systems <info@nautechsystems.io>"
@@ -5934,6 +5952,12 @@ who = "Nautech Systems <info@nautechsystems.io>"
 criteria = "safe-to-deploy"
 delta = "0.2.2 -> 0.2.3"
 notes = "Reviewed published source. Split lookup/property modules, packed table bounds, width-state arithmetic, and generated Unicode data reviewed. Runtime uses safe bounded indexing without unsafe or ambient access; Cargo does not run generator scripts."
+
+[[audits.url]]
+who = "Nautech Systems <info@nautechsystems.io>"
+criteria = "safe-to-deploy"
+delta = "2.5.8 -> 2.5.9"
+notes = "Reviewed the checksum-verified crates.io delta. Fixes RUSTSEC-2026-0592 by limiting blob origin resolution to the schemes allowed by the URL Standard. Also bounds path shortening to the path component and updates URL parsing and encoding to match the standard. Requires form_urlencoded 1.2.3. No new unsafe code or build script changes."
 
 [[audits.uuid]]
 who = "Nautech Systems <info@nautechsystems.io>"

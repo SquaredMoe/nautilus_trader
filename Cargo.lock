@@ -2721,9 +2721,9 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "databento"
-version = "0.63.0"
+version = "0.65.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "051a91d6950dd24d084f3374a94f295415bd30710836b7077813e01f16a26ff4"
+checksum = "b37d28459a1678c29db122f1175590605b92e346b2ddbdb05a1c317c97886458"
 dependencies = [
  "async-compression",
  "bon",
@@ -3395,9 +3395,9 @@ dependencies = [
 
 [[package]]
 name = "dbn"
-version = "0.71.0"
+version = "0.74.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4cd13d45f15b0178b517293b48d62b059fbb2b44712f5943a9bd87063b63369a"
+checksum = "3f40079b45a46eec4a7e96e6c1b9a530528d7878b13b32f47556181537a0ee3b"
 dependencies = [
  "async-compression",
  "async-stream",
@@ -3417,9 +3417,9 @@ dependencies = [
 
 [[package]]
 name = "dbn-macros"
-version = "0.71.0"
+version = "0.74.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5aef6f95f9623e8d8697a55a557d1238cc014927cbf93fb9320de09d26b8504"
+checksum = "268e6872893e1036475d764ebab29ec3acf021d0dfe7312cc2156c451817f4ae"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -4020,9 +4020,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -6134,6 +6134,7 @@ dependencies = [
  "log",
  "nautilus-common",
  "nautilus-core",
+ "nautilus-execution",
  "nautilus-live",
  "nautilus-model",
  "nautilus-network",
@@ -11087,9 +11088,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",
