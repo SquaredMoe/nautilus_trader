@@ -60,12 +60,14 @@ Released on TBD (UTC).
 - Changed PostgreSQL option underlying, exercise, settlement, and spread tick columns; run `nautilus database init`
 - Changed PostgreSQL OMS recovery to restore `UNSPECIFIED` for legacy positions whose OMS metadata has no trader ID
 - Changed PostgreSQL `Cache::add` to persist per trader and skip legacy shared user entries on restore
+- Changed Redis cache startup and PostgreSQL bulk position loads to fail on unreadable records
 - Changed `Cache::add` to reject the reserved `position_oms:` key prefix
 - Changed `Cache::add_order` to reject venue order ID conflicts on insert. Handle `VenueOrderIdOwnershipError`
 - Changed `BinaryOption` Parquet writes to require registered tick schemes; register custom schemes before saving
 - Changed `TickSchemeError` with `TicksNotIncreasing`; update exhaustive matches
 - Changed `OptionValuationError` with `UnsupportedConvention`; update exhaustive matches
 - Changed local Greeks and implied forwards to reject inverse and mixed-currency options
+- Changed `GreeksCalculator::cache_futures_spread` to reject call/put pairs at or after expiry
 - Changed local option valuation to require currency evidence for the underlying price
 - Changed `OrderDeniedReason` and `OrderDeniedCode` with `MarketExitInProgress`; update exhaustive matches
 - Changed `SimulatedExchange::process_liquidations` to return `anyhow::Result<()>` for callers to handle
@@ -137,6 +139,7 @@ Released on TBD (UTC).
 - Fixed `OptionChainSlice` ignoring Greeks in `ts_event` and using trigger timestamps for `ts_init`
 - Fixed option-chain delta selection depending on the arrival order of Greeks conventions
 - Fixed delta option chains missing matching strikes outside the ATM fallback
+- Fixed local option Greeks and implied futures pricing to use fractional time to expiry on a 365-day basis
 - Fixed PostgreSQL cache startup hanging on current-thread Tokio or panicking on connection failure
 - Fixed PostgreSQL cache restoring another trader's OMS type when position IDs overlap
 - Fixed PostgreSQL `FuturesSpread` reloads panicking
@@ -149,6 +152,7 @@ Released on TBD (UTC).
 - Fixed open-only order checks leaving closed venue orders unresolved after lost updates
 - Fixed trailing stops updating while markets are not open or from stale reopen prices
 - Fixed consecutive simulated maker fills leaking synthetic last prices into later matching
+- Fixed simulated L2 liquidity consumption for delayed trades and re-added levels (#5739), thanks @aaurix
 - Fixed live startup connecting execution clients after a stop request during data connection
 - Fixed `LiveNode::start` skipping reconciliation for instruments sent during execution connect
 - Fixed `LiveNode::start` timing out when execution clients wait for account registration
