@@ -1610,7 +1610,6 @@ impl LiveNode {
                             }
                         }
                         ReportTaskOutcome::TimedOut => {
-                            self.cleanup_cancelled_report_tasks(&[]);
                             log::warn!(
                                 "Open-order report collection expired after {:?}",
                                 self.config.timeout_reconciliation,
@@ -1645,9 +1644,7 @@ impl LiveNode {
 
                     match result {
                         ReportTaskOutcome::Completed(PositionReportTaskResult::Positions(result)) => {
-                            if is_shutting_down {
-                                self.cleanup_cancelled_report_tasks(&[]);
-                            } else {
+                            if !is_shutting_down {
                                 let result = result.finish();
                                 position_report_task = self.handle_position_report_result(result);
                             }
@@ -1660,7 +1657,6 @@ impl LiveNode {
                             });
                         }
                         ReportTaskOutcome::TimedOut => {
-                            self.cleanup_cancelled_report_tasks(&[]);
                             log::warn!(
                                 "Position report collection expired after {:?}",
                                 self.config.timeout_reconciliation,
@@ -3914,7 +3910,6 @@ mod tests {
             timeout_portfolio: Duration::ZERO,
             timeout_disconnection: Duration::ZERO,
             delay_post_stop: Duration::ZERO,
-            timeout_shutdown: Duration::ZERO,
             ..Default::default()
         };
 
@@ -4545,7 +4540,6 @@ mod tests {
             timeout_portfolio: Duration::ZERO,
             timeout_disconnection: Duration::ZERO,
             delay_post_stop: Duration::ZERO,
-            timeout_shutdown: Duration::ZERO,
             ..Default::default()
         };
 
@@ -7110,7 +7104,7 @@ mod tests {
             .unwrap()
             .with_reconciliation(false)
             .with_delay_post_stop_secs(0)
-            .with_timeout_connection(1)
+            .with_timeout_connection_secs(1)
             .build()
             .unwrap();
         let instrument_id = InstrumentId::from("AUDUSD.SIM");
@@ -7292,7 +7286,7 @@ mod tests {
             .unwrap()
             .with_reconciliation(false)
             .with_delay_post_stop_secs(0)
-            .with_timeout_connection(1)
+            .with_timeout_connection_secs(1)
             .build()
             .unwrap();
         let instrument_id = InstrumentId::from("AUDUSD.SIM");
@@ -7339,7 +7333,7 @@ mod tests {
             .unwrap()
             .with_reconciliation(false)
             .with_delay_post_stop_secs(0)
-            .with_timeout_connection(1)
+            .with_timeout_connection_secs(1)
             .build()
             .unwrap();
         let instrument_id = InstrumentId::from("AUDUSD.SIM");
@@ -7375,7 +7369,7 @@ mod tests {
             .unwrap()
             .with_reconciliation(false)
             .with_delay_post_stop_secs(0)
-            .with_timeout_connection(1)
+            .with_timeout_connection_secs(1)
             .build()
             .unwrap();
         let existing_instrument_id = InstrumentId::from("AUDUSD.SIM");
@@ -7458,7 +7452,7 @@ mod tests {
             .unwrap()
             .with_reconciliation(false)
             .with_delay_post_stop_secs(0)
-            .with_timeout_connection(1)
+            .with_timeout_connection_secs(1)
             .build()
             .unwrap();
         let strategy_id = StrategyId::from("FUNDING_ARBITRAGE-001");
@@ -9424,7 +9418,6 @@ mod tests {
             timeout_connection: Duration::ZERO,
             timeout_reconciliation: Duration::ZERO,
             timeout_portfolio: Duration::ZERO,
-            timeout_shutdown: Duration::ZERO,
             ..Default::default()
         };
 
@@ -9723,16 +9716,21 @@ mod tests {
             .with_instance_id(UUID4::new())
             .with_load_state(false)
             .with_save_state(true)
-            .with_timeout_connection(30)
-            .with_timeout_reconciliation(60)
+            .with_timeout_connection_secs(30)
+            .with_timeout_reconciliation_secs(60)
             .with_reconciliation(true)
             .with_reconciliation_lookback_mins(120)
-            .with_timeout_portfolio(10)
+            .with_timeout_portfolio_secs(15)
             .with_timeout_disconnection_secs(5)
-            .with_delay_post_stop_secs(3)
-            .with_delay_shutdown_secs(10);
+            .with_delay_post_stop_secs(3);
 
         assert_eq!(builder.name(), "TestNode");
+
+        let node = builder.build().unwrap();
+
+        assert_eq!(node.config.timeout_connection, Duration::from_secs(30));
+        assert_eq!(node.config.timeout_reconciliation, Duration::from_secs(60));
+        assert_eq!(node.config.timeout_portfolio, Duration::from_secs(15));
     }
 
     #[rstest]
@@ -13241,11 +13239,12 @@ mod tests {
     }
 
     mod shutdown {
+        #[cfg(target_os = "linux")]
+        use nautilus_common::live::dst::time;
         use nautilus_common::{
             clients::ExecutionReportTask,
             component::component_state,
             enums::ComponentState,
-            live::dst::time,
             messages::{
                 data::UnsubscribeCommand,
                 execution::{CancelOrder, QueryOrder},
@@ -13694,7 +13693,6 @@ mod tests {
                 timeout_portfolio: Duration::ZERO,
                 timeout_disconnection: Duration::from_millis(10),
                 delay_post_stop: Duration::from_millis(if manage_stop { 250 } else { 50 }),
-                timeout_shutdown: Duration::ZERO,
                 ..Default::default()
             };
 
